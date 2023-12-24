@@ -1,5 +1,6 @@
 enum Token {
     Star,
+    Plus,
     Literal(char),
 }
 
@@ -7,6 +8,7 @@ enum Token {
 enum AstNode {
     Root(Vec<AstNode>),
     Star(Box<AstNode>),
+    Plus(Box<AstNode>),
     Literal(char),
 }
 
@@ -29,8 +31,6 @@ impl Regex {
 
         let ast = Self::parse(&mut token_stream);
 
-        println!("{ast:?}");
-
         let (dfa_nodes, dfa_transitions) = Self::codegen(ast);
 
         Regex {
@@ -43,6 +43,7 @@ impl Regex {
     fn lex(source: &str) -> impl Iterator<Item = Token> + '_ {
         source.chars().map(|c| match c {
             '*' => Token::Star,
+            '+' => Token::Plus,
             x => Token::Literal(x),
         })
     }
@@ -54,6 +55,7 @@ impl Regex {
         for token in tokens {
             let new_node = match token {
                 Token::Star => AstNode::Star(Box::new(root_vec.pop().unwrap())),
+                Token::Plus => AstNode::Plus(Box::new(root_vec.pop().unwrap())),
                 Token::Literal(c) => AstNode::Literal(c),
             };
 
@@ -92,6 +94,38 @@ impl Regex {
         let end_node = DfaNode { accepting: true };
         nodes.push(end_node);
 
+        let mut new_transitions = Vec::new();
+        let mut transitions_to_remove = Vec::new();
+
+        for (i, (t_start, _, t_end)) in transitions
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, c, _))| *c == None)
+            .rev()
+        {
+            transitions_to_remove.push(i);
+
+            if nodes[*t_end].accepting {
+                nodes[*t_start].accepting = true;
+            }
+
+            let mut new = transitions
+                .iter()
+                .filter(|(s, _, e)| *s == t_start + 1 && *e == *t_end)
+                .map(|(s, c, e)| (s - 1, *c, *e))
+                .collect::<Vec<Transition>>();
+
+            new_transitions.append(&mut new);
+        }
+
+        for ttr in transitions_to_remove {
+            transitions.remove(ttr);
+        }
+
+        transitions.append(&mut new_transitions);
+
+        nodes.remove(last_index + 1);
+
         (nodes, transitions)
     }
 
@@ -99,7 +133,14 @@ impl Regex {
         match node {
             AstNode::Literal(char) => vec![(prev_index, Some(*char), self_index)],
             AstNode::Star(child) => {
-                let mut fns = vec![(self_index - 1, None, self_index + 1)];
+                let mut fns = vec![];
+                fns.append(&mut Self::get_transitions(child, self_index, prev_index));
+                fns.append(&mut Self::get_transitions(child, self_index, self_index));
+                fns.push((self_index - 1, None, self_index + 1));
+                fns
+            }
+            AstNode::Plus(child) => {
+                let mut fns = vec![];
                 fns.append(&mut Self::get_transitions(child, self_index, prev_index));
                 fns.append(&mut Self::get_transitions(child, self_index, self_index));
                 fns
@@ -120,15 +161,7 @@ impl Regex {
             match direct_match {
                 Some((_, _, end)) => state = *end,
                 None => {
-                    let indirect_match = self
-                        .dfa_transitions
-                        .iter()
-                        .find(|(start, filter, _)| *start == state && *filter == None);
-
-                    match indirect_match {
-                        Some((_, _, end)) => state = *end,
-                        None => return false,
-                    };
+                    return false
                 }
             };
         }
@@ -137,10 +170,11 @@ impl Regex {
 }
 
 fn main() {
-    let regex = Regex::new("a");
+    let regex = Regex::new("https://a+b*");
 
     println!("{regex:?}");
 
-    println!("{}", regex.verify("aa"));
-    println!("{}", regex.verify("b"));
+    println!("{}", regex.verify("https://"));
+    println!("{}", regex.verify("https://aaaaaa"));
+    println!("{}", regex.verify("https://aaabbbbbb"));
 }
