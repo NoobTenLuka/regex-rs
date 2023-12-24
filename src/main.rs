@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::{collections::HashMap, fmt::Display};
 
 enum Token {
     Star,
@@ -50,7 +50,7 @@ struct DfaNode {
     accepting: bool,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 enum TransitionFilter {
     None,
     Char(char),
@@ -62,7 +62,7 @@ type Transition = (usize, TransitionFilter, usize);
 #[derive(Debug)]
 pub struct Regex {
     dfa_nodes: Vec<DfaNode>,
-    dfa_transitions: Vec<Transition>,
+    dfa_transitions: HashMap<(usize, TransitionFilter), usize>,
 }
 
 impl Display for Regex {
@@ -71,17 +71,17 @@ impl Display for Regex {
             let to_self = self
                 .dfa_transitions
                 .iter()
-                .find(|(start, _, end)| *start == i && *end == i);
+                .find(|((start, _), end)| *start == i && **end == i);
 
             let to_next = self
                 .dfa_transitions
                 .iter()
-                .find(|(start, _, end)| *start == i && *end == i + 1);
+                .find(|((start, _), end)| *start == i && **end == i + 1);
 
             let to_second_next = self
                 .dfa_transitions
                 .iter()
-                .find(|(start, _, end)| *start == i && *end == i + 2);
+                .find(|((start, _), end)| *start == i && **end == i + 2);
 
             if node.accepting {
                 write!(f, "A")?;
@@ -112,13 +112,13 @@ impl Regex {
 
         let ast = Self::parse(&mut token_stream);
 
-        println!("{ast}");
-
         let (dfa_nodes, dfa_transitions) = Self::codegen(ast);
 
         Regex {
             dfa_nodes,
-            dfa_transitions,
+            dfa_transitions: HashMap::from_iter(
+                dfa_transitions.iter().map(|(s, t, e)| ((*s, *t), *e)),
+            ),
         }
     }
 
@@ -240,20 +240,17 @@ impl Regex {
         let mut chars = input.chars().peekable();
 
         while let Some(char) = chars.next() {
-            let direct_match = self.dfa_transitions.iter().find(|(start, filter, _)| {
-                *start == state && *filter == TransitionFilter::Char(char)
-            });
-            let indirect_match = self
+            let direct_match = self
                 .dfa_transitions
-                .iter()
-                .find(|(start, filter, _)| *start == state && *filter == TransitionFilter::All);
+                .get(&(state, TransitionFilter::Char(char)));
+            let indirect_match = self.dfa_transitions.get(&(state, TransitionFilter::All));
 
             match direct_match {
-                Some((_, _, end)) if indirect_match.is_none() || Some(&char) != chars.peek() => {
+                Some(end) if indirect_match.is_none() || Some(&char) != chars.peek() => {
                     state = *end
                 }
                 _ => match indirect_match {
-                    Some((_, _, end)) => state = *end,
+                    Some(end) => state = *end,
                     None => return false,
                 },
             };
@@ -264,8 +261,6 @@ impl Regex {
 
 fn main() {
     let regex = Regex::new("https://.+b");
-
-    println!("{regex}");
 
     println!("{}", regex.verify("https://b"));
     println!("{}", regex.verify("https://guten_morgenb"));
