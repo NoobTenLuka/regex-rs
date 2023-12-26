@@ -4,6 +4,8 @@ enum Token {
     Star,
     Plus,
     Dot,
+    OpeningBracket,
+    ClosingBracket,
     Literal(char),
 }
 
@@ -13,36 +15,8 @@ enum AstNode {
     Star(Box<AstNode>),
     Plus(Box<AstNode>),
     Dot,
+    Bracket(Vec<AstNode>),
     Literal(char),
-}
-
-impl Display for AstNode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Root(childs) => {
-                writeln!(f, "Root:")?;
-                for child in childs {
-                    writeln!(f, "  {child}")?;
-                }
-            }
-            Self::Star(child) => {
-                writeln!(f, "Star:")?;
-                write!(f, "    {child}")?;
-            }
-            Self::Plus(child) => {
-                writeln!(f, "Plus:")?;
-                write!(f, "    {child}")?;
-            }
-            Self::Dot => {
-                write!(f, "Dot")?;
-            }
-            Self::Literal(char) => {
-                write!(f, "Literal '{char}'")?;
-            }
-        }
-
-        Ok(())
-    }
 }
 
 #[derive(Debug)]
@@ -68,37 +42,41 @@ pub struct Regex {
 impl Display for Regex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for (i, node) in self.dfa_nodes.iter().enumerate() {
-            let to_self = self
+            let to_self: Vec<(&(usize, TransitionFilter), &usize)> = self
                 .dfa_transitions
                 .iter()
-                .find(|((start, _), end)| *start == i && **end == i);
+                .filter(|((start, _), end)| *start == i && **end == i)
+                .collect();
 
-            let to_next = self
+            let mut to_next = self
                 .dfa_transitions
                 .iter()
-                .find(|((start, _), end)| *start == i && **end == i + 1);
+                .filter(|((start, _), end)| *start == i && **end == i + 1);
 
-            let to_second_next = self
+            let mut to_second_next = self
                 .dfa_transitions
                 .iter()
-                .find(|((start, _), end)| *start == i && **end == i + 2);
+                .filter(|((start, _), end)| *start == i && **end == i + 2);
 
             if node.accepting {
                 write!(f, "A")?;
             }
 
             write!(f, "({i:0>3})")?;
-            match to_self {
-                Some(x) => writeln!(f, " ⮌ {:?}", x.1)?,
-                None => writeln!(f)?,
+            if !to_self.is_empty() {
+                write!(f, " ⮌")?;
+            }
+            for x in to_self {
+                write!(f, " {:?}", x.0 .1)?;
+            }
+            writeln!(f)?;
+
+            while let Some(x) = to_next.next() {
+                writeln!(f, "  ↓ {:?}", x.0 .1)?;
             }
 
-            if let Some(x) = to_next {
-                writeln!(f, "  ↓ {:?}", x.1)?;
-            }
-
-            if let Some(x) = to_second_next {
-                writeln!(f, "  2  ↓ {:?}", x.1)?;
+            while let Some(x) = to_second_next.next() {
+                writeln!(f, "  2  ↓ {:?}", x.0 .1)?;
             }
         }
 
@@ -111,6 +89,8 @@ impl Regex {
         let mut token_stream = Self::lex(regex);
 
         let ast = Self::parse(&mut token_stream);
+
+        Self::pprint_ast(&ast, 0);
 
         let (dfa_nodes, dfa_transitions) = Self::codegen(ast);
 
@@ -128,6 +108,8 @@ impl Regex {
             '*' => Token::Star,
             '+' => Token::Plus,
             '.' => Token::Dot,
+            '[' => Token::OpeningBracket,
+            ']' => Token::ClosingBracket,
             x => Token::Literal(x),
         })
     }
@@ -136,18 +118,36 @@ impl Regex {
     fn parse(tokens: &mut impl Iterator<Item = Token>) -> AstNode {
         let mut root_vec = Vec::new();
 
-        for token in tokens {
+        while let Some(token) = tokens.next() {
             let new_node = match token {
                 Token::Star => AstNode::Star(Box::new(root_vec.pop().unwrap())),
                 Token::Plus => AstNode::Plus(Box::new(root_vec.pop().unwrap())),
                 Token::Dot => AstNode::Dot,
+                Token::OpeningBracket => Self::parse_bracket(tokens),
                 Token::Literal(c) => AstNode::Literal(c),
+                _ => panic!(),
             };
 
             root_vec.push(new_node);
         }
 
         AstNode::Root(root_vec)
+    }
+
+    fn parse_bracket(tokens: &mut impl Iterator<Item = Token>) -> AstNode {
+        let mut bracket_chars = Vec::new();
+        while let Some(token) = tokens.next() {
+            let new_node = match token {
+                Token::Literal(c) => AstNode::Literal(c),
+                Token::ClosingBracket => return AstNode::Bracket(bracket_chars),
+                Token::OpeningBracket => AstNode::Literal('['),
+                Token::Dot => AstNode::Literal('.'),
+                Token::Star => AstNode::Literal('*'),
+                Token::Plus => AstNode::Literal('+'),
+            };
+            bracket_chars.push(new_node)
+        }
+        panic!()
     }
 
     // Abstract Sytax Tree -> Deterministic Finite Automaton
@@ -231,6 +231,13 @@ impl Regex {
                 fns
             }
             AstNode::Dot => vec![(prev_index, TransitionFilter::All, self_index)],
+            AstNode::Bracket(childs) => {
+                let mut fns = vec![];
+                for child in childs {
+                    fns.append(&mut Self::get_transitions(child, self_index, prev_index))
+                }
+                fns
+            }
             _ => unreachable!(),
         }
     }
@@ -257,12 +264,53 @@ impl Regex {
         }
         self.dfa_nodes[state].accepting
     }
+
+    fn pprint_ast(node: &AstNode, indentation_level: usize) {
+        print!("{}", "  ".repeat(indentation_level));
+        match node {
+            AstNode::Root(childs) => {
+                println!("Root:");
+                for child in childs {
+                    Self::pprint_ast(child, indentation_level + 1)
+                }
+                println!();
+            }
+            AstNode::Star(child) => {
+                println!("Star:");
+                Self::pprint_ast(child, indentation_level + 1)
+            }
+            AstNode::Plus(child) => {
+                println!("Plus:");
+                Self::pprint_ast(child, indentation_level + 1)
+            }
+            AstNode::Dot => {
+                println!("Dot");
+            }
+            AstNode::Bracket(childs) => {
+                println!("Bracket:");
+                for child in childs {
+                    Self::pprint_ast(child, indentation_level + 1)
+                }
+            }
+            AstNode::Literal(char) => {
+                println!("Literal '{char}'");
+            }
+        }
+    }
 }
 
 fn main() {
-    let regex = Regex::new("https://.+b");
+    let regex = Regex::new("https://.+[.].+");
 
-    println!("{}", regex.verify("https://b"));
+    println!("{regex}");
+
+    println!("{}", regex.verify("https://google.com"));
     println!("{}", regex.verify("https://guten_morgenb"));
     println!("{}", regex.verify("https://aaab"));
+
+    let regex = Regex::new("[ab]*");
+
+    println!("{regex}");
+
+    println!("{}", regex.verify("baaa"));
 }
