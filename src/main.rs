@@ -1,5 +1,6 @@
 use std::{collections::HashMap, fmt::Display};
 
+#[derive(PartialEq, Eq)]
 enum Token {
     Star,
     Plus,
@@ -8,10 +9,12 @@ enum Token {
     ClosingBracket,
     Escape,
     QuestionMark,
+    Dollar,
+    Hat,
     Literal(char),
 }
 
-#[derive(Debug)]
+#[derive(PartialEq, Eq, Debug)]
 enum AstNode {
     Root(Vec<AstNode>),
     Star(Box<AstNode>),
@@ -19,6 +22,8 @@ enum AstNode {
     QuestionMark(Box<AstNode>),
     Dot,
     Bracket(Vec<AstNode>),
+    Dollar,
+    Hat,
     Literal(char),
 }
 
@@ -40,6 +45,7 @@ type Transition = (usize, TransitionFilter, usize);
 pub struct Regex {
     dfa_nodes: Vec<DfaNode>,
     dfa_transitions: HashMap<(usize, TransitionFilter), usize>,
+    starts_with_hat: bool,
 }
 
 impl Display for Regex {
@@ -95,13 +101,14 @@ impl Regex {
 
         Self::pprint_ast(&ast, 0);
 
-        let (dfa_nodes, dfa_transitions) = Self::codegen(ast);
+        let (dfa_nodes, dfa_transitions, starts_with_hat) = Self::codegen(ast);
 
         Regex {
             dfa_nodes,
             dfa_transitions: HashMap::from_iter(
                 dfa_transitions.iter().map(|(s, t, e)| ((*s, *t), *e)),
             ),
+            starts_with_hat,
         }
     }
 
@@ -115,6 +122,8 @@ impl Regex {
             ']' => Token::ClosingBracket,
             '?' => Token::QuestionMark,
             '\\' => Token::Escape,
+            '$' => Token::Dollar,
+            '^' => Token::Hat,
             x => Token::Literal(x),
         })
     }
@@ -122,23 +131,55 @@ impl Regex {
     // Token Stream -> Abstract Syntax Tree
     fn parse(tokens: &mut impl Iterator<Item = Token>) -> AstNode {
         let mut root_vec = Vec::new();
+        let mut has_dollar = false;
+
+        let first_token = tokens.next().unwrap();
+        if first_token != Token::Hat {
+            let new_node = Self::parse_rule(first_token, tokens, &mut root_vec, &mut has_dollar);
+
+            root_vec.push(new_node);
+        } else {
+            root_vec.push(AstNode::Hat);
+        }
 
         while let Some(token) = tokens.next() {
-            let new_node = match token {
-                Token::Star => AstNode::Star(Box::new(root_vec.pop().unwrap())),
-                Token::Plus => AstNode::Plus(Box::new(root_vec.pop().unwrap())),
-                Token::QuestionMark => AstNode::QuestionMark(Box::new(root_vec.pop().unwrap())),
-                Token::Dot => AstNode::Dot,
-                Token::OpeningBracket => Self::parse_bracket(tokens),
-                Token::Escape => Self::parse_escape(tokens.next().unwrap()),
-                Token::Literal(c) => AstNode::Literal(c),
-                Token::ClosingBracket => panic!(),
-            };
+            let new_node = Self::parse_rule(token, tokens, &mut root_vec, &mut has_dollar);
 
             root_vec.push(new_node);
         }
 
+        if !has_dollar {
+            root_vec.push(AstNode::Star(Box::new(AstNode::Dot)));
+        }
+
         AstNode::Root(root_vec)
+    }
+
+    fn parse_rule(
+        token: Token,
+        rest_tokens: &mut impl Iterator<Item = Token>,
+        root_vec: &mut Vec<AstNode>,
+        has_dollar: &mut bool,
+    ) -> AstNode {
+        if *has_dollar {
+            panic!();
+        }
+
+        match token {
+            Token::Star => AstNode::Star(Box::new(root_vec.pop().unwrap())),
+            Token::Plus => AstNode::Plus(Box::new(root_vec.pop().unwrap())),
+            Token::QuestionMark => AstNode::QuestionMark(Box::new(root_vec.pop().unwrap())),
+            Token::Dot => AstNode::Dot,
+            Token::OpeningBracket => Self::parse_bracket(rest_tokens),
+            Token::Escape => Self::parse_escape(rest_tokens.next().unwrap()),
+            Token::Literal(c) => AstNode::Literal(c),
+            Token::ClosingBracket => panic!(),
+            Token::Hat => panic!(),
+            Token::Dollar => {
+                *has_dollar = true;
+                AstNode::Dollar
+            }
+        }
     }
 
     fn parse_bracket(tokens: &mut impl Iterator<Item = Token>) -> AstNode {
@@ -156,6 +197,8 @@ impl Regex {
 
     fn parse_escape(token: Token) -> AstNode {
         match token {
+            Token::Dollar => AstNode::Literal('$'),
+            Token::Hat => AstNode::Literal('^'),
             Token::Escape => AstNode::Literal('\\'),
             Token::OpeningBracket => AstNode::Literal('['),
             Token::ClosingBracket => AstNode::Literal(']'),
@@ -191,20 +234,29 @@ impl Regex {
     }
 
     // Abstract Sytax Tree -> Deterministic Finite Automaton
-    fn codegen(root: AstNode) -> (Vec<DfaNode>, Vec<Transition>) {
+    fn codegen(root: AstNode) -> (Vec<DfaNode>, Vec<Transition>, bool) {
         let mut nodes = Vec::new();
         let mut transitions = Vec::new();
         let start_node = DfaNode { accepting: false };
         nodes.push(start_node);
 
+        let mut starts_with_hat = false;
         match root {
             AstNode::Root(child_nodes) => {
+                if child_nodes[0] == AstNode::Hat {
+                    starts_with_hat = true;
+                }
+
                 for node in child_nodes {
-                    transitions.append(&mut Self::get_transitions(
-                        &node,
-                        nodes.len(),
-                        nodes.len() - 1,
-                    ));
+                    let mut gotten_transitions =
+                        Self::get_transitions(&node, nodes.len(), nodes.len() - 1);
+
+                    if gotten_transitions.is_empty() {
+                        continue;
+                    }
+
+                    transitions.append(&mut gotten_transitions);
+
                     let dfa_node = DfaNode { accepting: false };
                     nodes.push(dfa_node);
                 }
@@ -251,7 +303,7 @@ impl Regex {
 
         nodes[last_index].accepting = true;
 
-        (nodes, transitions)
+        (nodes, transitions, starts_with_hat)
     }
 
     fn get_transitions(node: &AstNode, self_index: usize, prev_index: usize) -> Vec<Transition> {
@@ -284,6 +336,8 @@ impl Regex {
                 fns.push((self_index - 1, TransitionFilter::None, self_index + 1));
                 fns
             }
+            AstNode::Dollar => vec![],
+            AstNode::Hat => vec![],
             AstNode::Root(_) => unreachable!(),
         }
     }
@@ -304,7 +358,13 @@ impl Regex {
                 }
                 _ => match indirect_match {
                     Some(end) => state = *end,
-                    None => return false,
+                    None => {
+                        if self.starts_with_hat {
+                            return false;
+                        } else {
+                            state = 0
+                        }
+                    }
                 },
             };
         }
@@ -342,6 +402,12 @@ impl Regex {
                 println!("QuestionMark:");
                 Self::pprint_ast(child, indentation_level + 1)
             }
+            AstNode::Dollar => {
+                println!("Dollar");
+            }
+            AstNode::Hat => {
+                println!("Hat");
+            }
             AstNode::Literal(char) => {
                 println!("Literal '{char}'");
             }
@@ -350,17 +416,18 @@ impl Regex {
 }
 
 fn main() {
-    let regex = Regex::new("https?://.+\\.?.+");
+    let regex = Regex::new("^https?://.+\\.?.+");
 
     println!("{regex}");
 
     println!("{}", regex.verify("https://google.com"));
     println!("{}", regex.verify("https://twitch.tv"));
-    println!("{}", regex.verify("http://localhost"));
+    println!("{}", regex.verify("Meine Webseite haha: http://localhost"));
 
     let regex = Regex::new("\\d+");
 
     println!("{regex}");
 
-    println!("{}", regex.verify("19"));
+    println!("{}", regex.verify("Ich bin 19 Jahre alt!"));
+    println!("{}", regex.verify(""));
 }
