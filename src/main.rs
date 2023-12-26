@@ -6,6 +6,7 @@ enum Token {
     Dot,
     OpeningBracket,
     ClosingBracket,
+    Escape,
     Literal(char),
 }
 
@@ -110,6 +111,7 @@ impl Regex {
             '.' => Token::Dot,
             '[' => Token::OpeningBracket,
             ']' => Token::ClosingBracket,
+            '\\' => Token::Escape,
             x => Token::Literal(x),
         })
     }
@@ -124,6 +126,7 @@ impl Regex {
                 Token::Plus => AstNode::Plus(Box::new(root_vec.pop().unwrap())),
                 Token::Dot => AstNode::Dot,
                 Token::OpeningBracket => Self::parse_bracket(tokens),
+                Token::Escape => Self::parse_escape(tokens.next().unwrap()),
                 Token::Literal(c) => AstNode::Literal(c),
                 _ => panic!(),
             };
@@ -144,10 +147,46 @@ impl Regex {
                 Token::Dot => AstNode::Literal('.'),
                 Token::Star => AstNode::Literal('*'),
                 Token::Plus => AstNode::Literal('+'),
+                Token::Escape => AstNode::Literal('\\'),
             };
             bracket_chars.push(new_node)
         }
         panic!()
+    }
+
+    fn parse_escape(token: Token) -> AstNode {
+        match token {
+            Token::Escape => AstNode::Literal('\\'),
+            Token::OpeningBracket => AstNode::Literal('['),
+            Token::ClosingBracket => AstNode::Literal(']'),
+            Token::Star => AstNode::Literal('*'),
+            Token::Plus => AstNode::Literal('+'),
+            Token::Dot => AstNode::Literal('.'),
+            Token::Literal(c) => match c {
+                's' => {
+                    let mut nodes = vec![];
+                    nodes.push(AstNode::Literal(' '));
+                    nodes.push(AstNode::Literal('\n'));
+                    nodes.push(AstNode::Literal('\t'));
+                    AstNode::Bracket(nodes)
+                }
+                'd' => {
+                    let mut nodes = vec![];
+                    nodes.push(AstNode::Literal('1'));
+                    nodes.push(AstNode::Literal('2'));
+                    nodes.push(AstNode::Literal('3'));
+                    nodes.push(AstNode::Literal('4'));
+                    nodes.push(AstNode::Literal('5'));
+                    nodes.push(AstNode::Literal('6'));
+                    nodes.push(AstNode::Literal('7'));
+                    nodes.push(AstNode::Literal('8'));
+                    nodes.push(AstNode::Literal('9'));
+                    nodes.push(AstNode::Literal('0'));
+                    AstNode::Bracket(nodes)
+                }
+                x => AstNode::Literal(x),
+            },
+        }
     }
 
     // Abstract Sytax Tree -> Deterministic Finite Automaton
@@ -300,7 +339,7 @@ impl Regex {
 }
 
 fn main() {
-    let regex = Regex::new("https://.+[.].+");
+    let regex = Regex::new("https://.+\\..+");
 
     println!("{regex}");
 
@@ -308,9 +347,9 @@ fn main() {
     println!("{}", regex.verify("https://guten_morgenb"));
     println!("{}", regex.verify("https://aaab"));
 
-    let regex = Regex::new("[ab]*");
+    let regex = Regex::new("\\d+");
 
     println!("{regex}");
 
-    println!("{}", regex.verify("baaa"));
+    println!("{}", regex.verify("19"));
 }
