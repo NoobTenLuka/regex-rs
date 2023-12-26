@@ -7,6 +7,7 @@ enum Token {
     OpeningBracket,
     ClosingBracket,
     Escape,
+    QuestionMark,
     Literal(char),
 }
 
@@ -15,6 +16,7 @@ enum AstNode {
     Root(Vec<AstNode>),
     Star(Box<AstNode>),
     Plus(Box<AstNode>),
+    QuestionMark(Box<AstNode>),
     Dot,
     Bracket(Vec<AstNode>),
     Literal(char),
@@ -111,6 +113,7 @@ impl Regex {
             '.' => Token::Dot,
             '[' => Token::OpeningBracket,
             ']' => Token::ClosingBracket,
+            '?' => Token::QuestionMark,
             '\\' => Token::Escape,
             x => Token::Literal(x),
         })
@@ -124,11 +127,12 @@ impl Regex {
             let new_node = match token {
                 Token::Star => AstNode::Star(Box::new(root_vec.pop().unwrap())),
                 Token::Plus => AstNode::Plus(Box::new(root_vec.pop().unwrap())),
+                Token::QuestionMark => AstNode::QuestionMark(Box::new(root_vec.pop().unwrap())),
                 Token::Dot => AstNode::Dot,
                 Token::OpeningBracket => Self::parse_bracket(tokens),
                 Token::Escape => Self::parse_escape(tokens.next().unwrap()),
                 Token::Literal(c) => AstNode::Literal(c),
-                _ => panic!(),
+                Token::ClosingBracket => panic!(),
             };
 
             root_vec.push(new_node);
@@ -143,11 +147,7 @@ impl Regex {
             let new_node = match token {
                 Token::Literal(c) => AstNode::Literal(c),
                 Token::ClosingBracket => return AstNode::Bracket(bracket_chars),
-                Token::OpeningBracket => AstNode::Literal('['),
-                Token::Dot => AstNode::Literal('.'),
-                Token::Star => AstNode::Literal('*'),
-                Token::Plus => AstNode::Literal('+'),
-                Token::Escape => AstNode::Literal('\\'),
+                x => Self::parse_escape(x),
             };
             bracket_chars.push(new_node)
         }
@@ -162,6 +162,7 @@ impl Regex {
             Token::Star => AstNode::Literal('*'),
             Token::Plus => AstNode::Literal('+'),
             Token::Dot => AstNode::Literal('.'),
+            Token::QuestionMark => AstNode::Literal('?'),
             Token::Literal(c) => match c {
                 's' => {
                     let mut nodes = vec![];
@@ -277,7 +278,13 @@ impl Regex {
                 }
                 fns
             }
-            _ => unreachable!(),
+            AstNode::QuestionMark(child) => {
+                let mut fns = vec![];
+                fns.append(&mut Self::get_transitions(child, self_index, prev_index));
+                fns.push((self_index - 1, TransitionFilter::None, self_index + 1));
+                fns
+            }
+            AstNode::Root(_) => unreachable!(),
         }
     }
 
@@ -331,6 +338,10 @@ impl Regex {
                     Self::pprint_ast(child, indentation_level + 1)
                 }
             }
+            AstNode::QuestionMark(child) => {
+                println!("QuestionMark:");
+                Self::pprint_ast(child, indentation_level + 1)
+            }
             AstNode::Literal(char) => {
                 println!("Literal '{char}'");
             }
@@ -339,13 +350,13 @@ impl Regex {
 }
 
 fn main() {
-    let regex = Regex::new("https://.+\\..+");
+    let regex = Regex::new("https?://.+\\.?.+");
 
     println!("{regex}");
 
     println!("{}", regex.verify("https://google.com"));
-    println!("{}", regex.verify("https://guten_morgenb"));
-    println!("{}", regex.verify("https://aaab"));
+    println!("{}", regex.verify("https://twitch.tv"));
+    println!("{}", regex.verify("http://localhost"));
 
     let regex = Regex::new("\\d+");
 
