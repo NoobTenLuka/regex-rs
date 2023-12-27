@@ -42,6 +42,15 @@ enum TransitionFilter {
 type Transition = (usize, TransitionFilter, usize);
 
 #[derive(Debug)]
+pub enum RegexCompileError {
+    MissingBracketError(char),
+    UnexpectedSymbolError(char),
+    EmptyError,
+    SymbolAfterDollarError,
+    DanglingModifierError,
+}
+
+#[derive(Debug)]
 pub struct Regex {
     dfa_nodes: Vec<DfaNode>,
     dfa_transitions: HashMap<(usize, TransitionFilter), usize>,
@@ -57,12 +66,12 @@ impl Display for Regex {
                 .filter(|((start, _), end)| *start == i && **end == i)
                 .collect();
 
-            let mut to_next = self
+            let to_next = self
                 .dfa_transitions
                 .iter()
                 .filter(|((start, _), end)| *start == i && **end == i + 1);
 
-            let mut to_second_next = self
+            let to_second_next = self
                 .dfa_transitions
                 .iter()
                 .filter(|((start, _), end)| *start == i && **end == i + 2);
@@ -80,11 +89,11 @@ impl Display for Regex {
             }
             writeln!(f)?;
 
-            while let Some(x) = to_next.next() {
+            for x in to_next {
                 writeln!(f, "  ↓ {:?}", x.0 .1)?;
             }
 
-            while let Some(x) = to_second_next.next() {
+            for x in to_second_next {
                 writeln!(f, "  2  ↓ {:?}", x.0 .1)?;
             }
         }
@@ -93,23 +102,34 @@ impl Display for Regex {
     }
 }
 
+#[derive(Default)]
+pub struct RegexOptions {
+    pretty_print_ast: bool,
+}
+
 impl Regex {
-    pub fn new(regex: &str) -> Self {
+    pub fn new(regex: &str) -> Result<Self, RegexCompileError> {
+        Self::new_with_options(regex, RegexOptions::default())
+    }
+
+    pub fn new_with_options(regex: &str, options: RegexOptions) -> Result<Self, RegexCompileError> {
         let mut token_stream = Self::lex(regex);
 
-        let ast = Self::parse(&mut token_stream);
+        let ast = Self::parse(&mut token_stream)?;
 
-        Self::pprint_ast(&ast, 0);
+        if options.pretty_print_ast {
+            Self::pprint_ast(&ast, 0);
+        }
 
         let (dfa_nodes, dfa_transitions, starts_with_hat) = Self::codegen(ast);
 
-        Regex {
+        Ok(Regex {
             dfa_nodes,
             dfa_transitions: HashMap::from_iter(
                 dfa_transitions.iter().map(|(s, t, e)| ((*s, *t), *e)),
             ),
             starts_with_hat,
-        }
+        })
     }
 
     // Input String -> Token Stream
@@ -129,13 +149,13 @@ impl Regex {
     }
 
     // Token Stream -> Abstract Syntax Tree
-    fn parse(tokens: &mut impl Iterator<Item = Token>) -> AstNode {
+    fn parse(tokens: &mut impl Iterator<Item = Token>) -> Result<AstNode, RegexCompileError> {
         let mut root_vec = Vec::new();
         let mut has_dollar = false;
 
-        let first_token = tokens.next().unwrap();
+        let first_token = tokens.next().ok_or(RegexCompileError::EmptyError)?;
         if first_token != Token::Hat {
-            let new_node = Self::parse_rule(first_token, tokens, &mut root_vec, &mut has_dollar);
+            let new_node = Self::parse_rule(first_token, tokens, &mut root_vec, &mut has_dollar)?;
 
             root_vec.push(new_node);
         } else {
@@ -143,7 +163,7 @@ impl Regex {
         }
 
         while let Some(token) = tokens.next() {
-            let new_node = Self::parse_rule(token, tokens, &mut root_vec, &mut has_dollar);
+            let new_node = Self::parse_rule(token, tokens, &mut root_vec, &mut has_dollar)?;
 
             root_vec.push(new_node);
         }
@@ -152,7 +172,7 @@ impl Regex {
             root_vec.push(AstNode::Star(Box::new(AstNode::Dot)));
         }
 
-        AstNode::Root(root_vec)
+        Ok(AstNode::Root(root_vec))
     }
 
     fn parse_rule(
@@ -160,39 +180,70 @@ impl Regex {
         rest_tokens: &mut impl Iterator<Item = Token>,
         root_vec: &mut Vec<AstNode>,
         has_dollar: &mut bool,
-    ) -> AstNode {
+    ) -> Result<AstNode, RegexCompileError> {
         if *has_dollar {
-            panic!();
+            return Err(RegexCompileError::SymbolAfterDollarError);
         }
 
         match token {
-            Token::Star => AstNode::Star(Box::new(root_vec.pop().unwrap())),
-            Token::Plus => AstNode::Plus(Box::new(root_vec.pop().unwrap())),
-            Token::QuestionMark => AstNode::QuestionMark(Box::new(root_vec.pop().unwrap())),
-            Token::Dot => AstNode::Dot,
+            Token::Star | Token::QuestionMark | Token::Plus => {
+                Self::parse_modifier(token, root_vec)
+            }
+            Token::Dot => Ok(AstNode::Dot),
             Token::OpeningBracket => Self::parse_bracket(rest_tokens),
-            Token::Escape => Self::parse_escape(rest_tokens.next().unwrap()),
-            Token::Literal(c) => AstNode::Literal(c),
-            Token::ClosingBracket => panic!(),
-            Token::Hat => panic!(),
+            Token::Escape => Ok(Self::parse_escape(rest_tokens.next().unwrap())),
+            Token::Literal(c) => Ok(AstNode::Literal(c)),
+            Token::ClosingBracket => Err(RegexCompileError::UnexpectedSymbolError('}')),
+            Token::Hat => Err(RegexCompileError::UnexpectedSymbolError('^')),
             Token::Dollar => {
                 *has_dollar = true;
-                AstNode::Dollar
+                Ok(AstNode::Dollar)
             }
         }
     }
 
-    fn parse_bracket(tokens: &mut impl Iterator<Item = Token>) -> AstNode {
+    fn parse_modifier(
+        token: Token,
+        root_vec: &mut Vec<AstNode>,
+    ) -> Result<AstNode, RegexCompileError> {
+        let previous_node = root_vec
+            .pop()
+            .ok_or(RegexCompileError::DanglingModifierError)?;
+
+        if matches!(
+            previous_node,
+            AstNode::Hat
+                | AstNode::Star(_)
+                | AstNode::Dollar
+                | AstNode::Plus(_)
+                | AstNode::QuestionMark(_)
+        ) {
+            return Err(RegexCompileError::DanglingModifierError);
+        }
+
+        let boxed_prev_node = Box::new(previous_node);
+
+        Ok(match token {
+            Token::Star => AstNode::Star(boxed_prev_node),
+            Token::Plus => AstNode::Plus(boxed_prev_node),
+            Token::QuestionMark => AstNode::QuestionMark(boxed_prev_node),
+            _ => unreachable!(),
+        })
+    }
+
+    fn parse_bracket(
+        tokens: &mut impl Iterator<Item = Token>,
+    ) -> Result<AstNode, RegexCompileError> {
         let mut bracket_chars = Vec::new();
-        while let Some(token) = tokens.next() {
+        for token in tokens {
             let new_node = match token {
                 Token::Literal(c) => AstNode::Literal(c),
-                Token::ClosingBracket => return AstNode::Bracket(bracket_chars),
+                Token::ClosingBracket => return Ok(AstNode::Bracket(bracket_chars)),
                 x => Self::parse_escape(x),
             };
             bracket_chars.push(new_node)
         }
-        panic!()
+        Err(RegexCompileError::MissingBracketError('}'))
     }
 
     fn parse_escape(token: Token) -> AstNode {
@@ -208,24 +259,26 @@ impl Regex {
             Token::QuestionMark => AstNode::Literal('?'),
             Token::Literal(c) => match c {
                 's' => {
-                    let mut nodes = vec![];
-                    nodes.push(AstNode::Literal(' '));
-                    nodes.push(AstNode::Literal('\n'));
-                    nodes.push(AstNode::Literal('\t'));
+                    let nodes = vec![
+                        AstNode::Literal(' '),
+                        AstNode::Literal('\n'),
+                        AstNode::Literal('\t'),
+                    ];
                     AstNode::Bracket(nodes)
                 }
                 'd' => {
-                    let mut nodes = vec![];
-                    nodes.push(AstNode::Literal('1'));
-                    nodes.push(AstNode::Literal('2'));
-                    nodes.push(AstNode::Literal('3'));
-                    nodes.push(AstNode::Literal('4'));
-                    nodes.push(AstNode::Literal('5'));
-                    nodes.push(AstNode::Literal('6'));
-                    nodes.push(AstNode::Literal('7'));
-                    nodes.push(AstNode::Literal('8'));
-                    nodes.push(AstNode::Literal('9'));
-                    nodes.push(AstNode::Literal('0'));
+                    let nodes = vec![
+                        AstNode::Literal('1'),
+                        AstNode::Literal('2'),
+                        AstNode::Literal('3'),
+                        AstNode::Literal('4'),
+                        AstNode::Literal('5'),
+                        AstNode::Literal('6'),
+                        AstNode::Literal('7'),
+                        AstNode::Literal('8'),
+                        AstNode::Literal('9'),
+                        AstNode::Literal('0'),
+                    ];
                     AstNode::Bracket(nodes)
                 }
                 x => AstNode::Literal(x),
@@ -342,7 +395,7 @@ impl Regex {
         }
     }
 
-    fn verify(&self, input: &str) -> bool {
+    pub fn verify(&self, input: &str) -> bool {
         let mut state = 0;
         let mut chars = input.chars().peekable();
 
@@ -415,19 +468,21 @@ impl Regex {
     }
 }
 
-fn main() {
-    let regex = Regex::new("^https?://.+\\.?.+");
+#[cfg(test)]
+mod tests {
+    use crate::Regex;
 
-    println!("{regex}");
+    #[test]
+    fn it_works() {
+        let regex = Regex::new("^https?://.+\\.?.+").unwrap();
 
-    println!("{}", regex.verify("https://google.com"));
-    println!("{}", regex.verify("https://twitch.tv"));
-    println!("{}", regex.verify("Meine Webseite haha: http://localhost"));
+        assert_eq!(regex.verify("https://google.com"), true);
+        assert_eq!(regex.verify("https://twitch.tv"), true);
+        assert_eq!(regex.verify("Meine Webseite haha: http://localhost"), false);
 
-    let regex = Regex::new("\\d+");
+        let regex = Regex::new("\\d+").unwrap();
 
-    println!("{regex}");
-
-    println!("{}", regex.verify("Ich bin 19 Jahre alt!"));
-    println!("{}", regex.verify(""));
+        assert_eq!(regex.verify("Ich bin 19 Jahre alt!"), true);
+        assert_eq!(regex.verify(""), false);
+    }
 }
