@@ -27,7 +27,7 @@ enum AstNode {
     Literal(char),
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 struct DfaNode {
     accepting: bool,
 }
@@ -41,7 +41,7 @@ enum TransitionFilter {
 
 type Transition = (usize, TransitionFilter, usize);
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum RegexCompileError {
     MissingBracketError(char),
     UnexpectedSymbolError(char),
@@ -50,15 +50,19 @@ pub enum RegexCompileError {
     DanglingModifierError,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Regex {
     dfa_nodes: Vec<DfaNode>,
     dfa_transitions: HashMap<(usize, TransitionFilter), usize>,
     starts_with_hat: bool,
+    ends_with_dollar: bool,
 }
 
 impl Display for Regex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Starts with hat: {:?}", self.starts_with_hat)?;
+        writeln!(f, "Ends with dollar: {:?}", self.ends_with_dollar)?;
+
         for (i, node) in self.dfa_nodes.iter().enumerate() {
             let to_self: Vec<(&(usize, TransitionFilter), &usize)> = self
                 .dfa_transitions
@@ -121,7 +125,7 @@ impl Regex {
             Self::pprint_ast(&ast, 0);
         }
 
-        let (dfa_nodes, dfa_transitions, starts_with_hat) = Self::codegen(ast);
+        let (dfa_nodes, dfa_transitions, starts_with_hat, ends_with_dollar) = Self::codegen(ast);
 
         Ok(Regex {
             dfa_nodes,
@@ -129,6 +133,7 @@ impl Regex {
                 dfa_transitions.iter().map(|(s, t, e)| ((*s, *t), *e)),
             ),
             starts_with_hat,
+            ends_with_dollar,
         })
     }
 
@@ -166,10 +171,6 @@ impl Regex {
             let new_node = Self::parse_rule(token, tokens, &mut root_vec, &mut has_dollar)?;
 
             root_vec.push(new_node);
-        }
-
-        if !has_dollar {
-            root_vec.push(AstNode::Star(Box::new(AstNode::Dot)));
         }
 
         Ok(AstNode::Root(root_vec))
@@ -243,7 +244,7 @@ impl Regex {
             };
             bracket_chars.push(new_node)
         }
-        Err(RegexCompileError::MissingBracketError('}'))
+        Err(RegexCompileError::MissingBracketError(']'))
     }
 
     fn parse_escape(token: Token) -> AstNode {
@@ -287,34 +288,36 @@ impl Regex {
     }
 
     // Abstract Sytax Tree -> Deterministic Finite Automaton
-    fn codegen(root: AstNode) -> (Vec<DfaNode>, Vec<Transition>, bool) {
+    fn codegen(root: AstNode) -> (Vec<DfaNode>, Vec<Transition>, bool, bool) {
         let mut nodes = Vec::new();
         let mut transitions = Vec::new();
         let start_node = DfaNode { accepting: false };
         nodes.push(start_node);
 
         let mut starts_with_hat = false;
-        match root {
-            AstNode::Root(child_nodes) => {
-                if child_nodes[0] == AstNode::Hat {
-                    starts_with_hat = true;
-                }
+        let mut ends_with_dollar = false;
 
-                for node in child_nodes {
-                    let mut gotten_transitions =
-                        Self::get_transitions(&node, nodes.len(), nodes.len() - 1);
-
-                    if gotten_transitions.is_empty() {
-                        continue;
-                    }
-
-                    transitions.append(&mut gotten_transitions);
-
-                    let dfa_node = DfaNode { accepting: false };
-                    nodes.push(dfa_node);
-                }
+        if let AstNode::Root(child_nodes) = root {
+            if child_nodes[0] == AstNode::Hat {
+                starts_with_hat = true;
             }
-            _ => panic!(),
+            if *child_nodes.last().unwrap() == AstNode::Dollar {
+                ends_with_dollar = true;
+            }
+
+            for node in child_nodes {
+                let mut gotten_transitions =
+                    Self::get_transitions(&node, nodes.len(), nodes.len() - 1);
+
+                if gotten_transitions.is_empty() {
+                    continue;
+                }
+
+                transitions.append(&mut gotten_transitions);
+
+                let dfa_node = DfaNode { accepting: false };
+                nodes.push(dfa_node);
+            }
         }
 
         let last_index = nodes.len() - 1;
@@ -356,7 +359,7 @@ impl Regex {
 
         nodes[last_index].accepting = true;
 
-        (nodes, transitions, starts_with_hat)
+        (nodes, transitions, starts_with_hat, ends_with_dollar)
     }
 
     fn get_transitions(node: &AstNode, self_index: usize, prev_index: usize) -> Vec<Transition> {
@@ -400,6 +403,10 @@ impl Regex {
         let mut chars = input.chars().peekable();
 
         while let Some(char) = chars.next() {
+            if !self.ends_with_dollar && self.dfa_nodes[state].accepting {
+                return true;
+            }
+
             let direct_match = self
                 .dfa_transitions
                 .get(&(state, TransitionFilter::Char(char)));
@@ -470,19 +477,110 @@ impl Regex {
 
 #[cfg(test)]
 mod tests {
-    use crate::Regex;
+    use crate::{Regex, RegexCompileError};
 
     #[test]
-    fn it_works() {
+    fn empty_regex_fails() {
+        let regex = Regex::new("");
+
+        assert_eq!(regex, Err(RegexCompileError::EmptyError));
+    }
+
+    #[test]
+    fn simple_regex_works() {
+        let regex = Regex::new("abc").unwrap();
+
+        assert!(regex.verify("There must be abc in here"));
+        assert!(!regex.verify("No ab followed by c in here"));
+    }
+
+    #[test]
+    fn simple_regex_with_start_and_end_works() {
+        let regex = Regex::new("^abc$").unwrap();
+
+        assert!(regex.verify("abc"));
+        assert!(!regex.verify("aabc"));
+        assert!(!regex.verify("abcc"));
+    }
+
+    #[test]
+    fn end_works() {
+        let regex = Regex::new("a$").unwrap();
+
+        assert!(regex.verify("this end in a"));
+        assert!(!regex.verify("this has an a but ends in b"));
+    }
+
+    #[test]
+    fn escaped_characters_work() {
+        let regex = Regex::new("\\.").unwrap();
+
+        assert!(regex.verify("."));
+        assert!(!regex.verify("a"));
+    }
+
+    #[test]
+    fn number_group_works() {
+        let regex = Regex::new("\\d").unwrap();
+
+        assert!(regex.verify("1"));
+        assert!(regex.verify("9"));
+        assert!(!regex.verify("a"));
+    }
+
+    #[test]
+    fn star_works() {
+        let regex = Regex::new("a*").unwrap();
+
+        assert!(regex.verify(""));
+        assert!(regex.verify("a"));
+        assert!(regex.verify("aa"));
+        assert!(regex.verify("b"));
+    }
+
+    #[test]
+    fn plus_works() {
+        let regex = Regex::new("a+").unwrap();
+
+        assert!(!regex.verify(""));
+        assert!(regex.verify("a"));
+        assert!(regex.verify("aa"));
+        assert!(!regex.verify("b"));
+    }
+
+    #[test]
+    fn question_mark_works() {
+        let regex = Regex::new("^a?$").unwrap();
+
+        assert!(regex.verify(""));
+        assert!(regex.verify("a"));
+        assert!(!regex.verify("aa"));
+    }
+
+    #[test]
+    fn matching_groups_work() {
+        let regex = Regex::new("^[ab]$").unwrap();
+
+        assert!(regex.verify("a"));
+        assert!(regex.verify("b"));
+        assert!(!regex.verify("c"));
+    }
+
+    #[test]
+    fn uncompleted_matching_group_fails() {
+        let regex = Regex::new("[ab");
+
+        assert_eq!(regex, Err(RegexCompileError::MissingBracketError(']')));
+    }
+
+    #[test]
+    fn complex_regex_works() {
         let regex = Regex::new("^https?://.+\\.?.+").unwrap();
 
-        assert_eq!(regex.verify("https://google.com"), true);
-        assert_eq!(regex.verify("https://twitch.tv"), true);
-        assert_eq!(regex.verify("Meine Webseite haha: http://localhost"), false);
+        println!("{regex}");
 
-        let regex = Regex::new("\\d+").unwrap();
-
-        assert_eq!(regex.verify("Ich bin 19 Jahre alt!"), true);
-        assert_eq!(regex.verify(""), false);
+        assert!(regex.verify("https://google.com"));
+        assert!(regex.verify("https://twitch.tv"));
+        assert!(!regex.verify("Meine Webseite haha: http://localhost"));
     }
 }
