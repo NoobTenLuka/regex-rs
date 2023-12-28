@@ -309,18 +309,23 @@ impl Regex {
                     AstNode::Bracket(nodes)
                 }
                 'd' => {
-                    let nodes = vec![
-                        AstNode::Literal('1'),
-                        AstNode::Literal('2'),
-                        AstNode::Literal('3'),
-                        AstNode::Literal('4'),
-                        AstNode::Literal('5'),
-                        AstNode::Literal('6'),
-                        AstNode::Literal('7'),
-                        AstNode::Literal('8'),
-                        AstNode::Literal('9'),
-                        AstNode::Literal('0'),
-                    ];
+                    let mut nodes = vec![];
+                    for c in '0'..='9' {
+                        nodes.push(AstNode::Literal(c));
+                    }
+                    AstNode::Bracket(nodes)
+                }
+                'w' => {
+                    let mut nodes = vec![AstNode::Literal('_')];
+                    for c in 'a'..='z' {
+                        nodes.push(AstNode::Literal(c));
+                    }
+                    for c in 'A'..='Z' {
+                        nodes.push(AstNode::Literal(c));
+                    }
+                    for c in '0'..='9' {
+                        nodes.push(AstNode::Literal(c));
+                    }
                     AstNode::Bracket(nodes)
                 }
                 x => AstNode::Literal(x),
@@ -634,7 +639,7 @@ mod tests {
 
     #[test]
     fn complex_regex_works() {
-        let regex = Regex::new("^https?://.+\\.?.+").unwrap();
+        let regex = Regex::new("^https?://\\w+\\.?[a-zA-Z]+").unwrap();
 
         println!("{regex}");
 
