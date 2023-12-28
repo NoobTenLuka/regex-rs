@@ -32,12 +32,12 @@ assert!(regex.verify(string_to_verify));
 | `^`      | Start of string           | Implemented |
 | `$`      | End of string             | Implemented |
 | `\\.`    | Escaped symbols matching  | Implemented |
+| `a{3}`   | Exact number matching     | Implemented |
+| `a{3,}`  | More-than number matching | Implemented |
+| `a{3,6}` | Between numbers matching  | Implemented |
 | `[^a-z]` | Not in range matching     | Planned     |
 | `\\S`    | Non-whitespace matching   | Planned     |
 | `\\D`    | Non-digit matching        | Planned     |
 | `\\W`    | Non-word matching         | Planned     |
-| `a|b`    | OR matching               | Planned     |
-| `a{3}`   | Exact number matching     | Planned     |
-| `a{3,}`  | More-than number matching | Planned     |
-| `a{3,6}` | Between numbers matching  | Planned     |
+| `a\|b`   | OR matching               | Planned     |
 | `(.*)`   | Capture groups            | Planned     |

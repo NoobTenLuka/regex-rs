@@ -7,11 +7,14 @@ enum Token {
     Dot,
     OpeningBracket,
     ClosingBracket,
+    OpeningAmountBracket,
+    ClosingAmountBracket,
     Escape,
     QuestionMark,
     Dollar,
     Hat,
     Minus,
+    Comma,
     Literal(char),
 }
 
@@ -21,6 +24,9 @@ enum AstNode {
     Star(Box<AstNode>),
     Plus(Box<AstNode>),
     QuestionMark(Box<AstNode>),
+    Amount(Box<AstNode>, usize),
+    MoreThan(Box<AstNode>, usize),
+    Between(Box<AstNode>, usize, usize),
     Dot,
     Bracket(Vec<AstNode>),
     Dollar,
@@ -50,6 +56,7 @@ pub enum RegexCompileError {
     EmptyError,
     SymbolAfterDollarError,
     DanglingModifierError,
+    MinGreaterMaxError,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -147,11 +154,14 @@ impl Regex {
             '.' => Token::Dot,
             '[' => Token::OpeningBracket,
             ']' => Token::ClosingBracket,
+            '{' => Token::OpeningAmountBracket,
+            '}' => Token::ClosingAmountBracket,
             '?' => Token::QuestionMark,
             '\\' => Token::Escape,
             '$' => Token::Dollar,
             '^' => Token::Hat,
             '-' => Token::Minus,
+            ',' => Token::Comma,
             x => Token::Literal(x),
         })
     }
@@ -190,8 +200,8 @@ impl Regex {
         }
 
         match token {
-            Token::Star | Token::QuestionMark | Token::Plus => {
-                Self::parse_modifier(token, root_vec)
+            Token::Star | Token::QuestionMark | Token::Plus | Token::OpeningAmountBracket => {
+                Self::parse_modifier(token, rest_tokens, root_vec)
             }
             Token::Dot => Ok(AstNode::Dot),
             Token::OpeningBracket => Self::parse_bracket(rest_tokens),
@@ -201,9 +211,11 @@ impl Regex {
                     .ok_or(RegexCompileError::MissingSymbolError)?,
             )),
             Token::Literal(c) => Ok(AstNode::Literal(c)),
-            Token::ClosingBracket => Err(RegexCompileError::UnexpectedSymbolError('}')),
+            Token::ClosingBracket => Err(RegexCompileError::UnexpectedSymbolError(']')),
+            Token::ClosingAmountBracket => Err(RegexCompileError::UnexpectedSymbolError('}')),
             Token::Hat => Err(RegexCompileError::UnexpectedSymbolError('^')),
             Token::Minus => Err(RegexCompileError::UnexpectedSymbolError('-')),
+            Token::Comma => Err(RegexCompileError::UnexpectedSymbolError(',')),
             Token::Dollar => {
                 *has_dollar = true;
                 Ok(AstNode::Dollar)
@@ -213,6 +225,7 @@ impl Regex {
 
     fn parse_modifier(
         token: Token,
+        rest_tokens: &mut impl Iterator<Item = Token>,
         root_vec: &mut Vec<AstNode>,
     ) -> Result<AstNode, RegexCompileError> {
         let previous_node = root_vec
@@ -226,6 +239,9 @@ impl Regex {
                 | AstNode::Dollar
                 | AstNode::Plus(_)
                 | AstNode::QuestionMark(_)
+                | AstNode::Amount(_, _)
+                | AstNode::MoreThan(_, _)
+                | AstNode::Between(_, _, _)
         ) {
             return Err(RegexCompileError::DanglingModifierError);
         }
@@ -236,6 +252,9 @@ impl Regex {
             Token::Star => AstNode::Star(boxed_prev_node),
             Token::Plus => AstNode::Plus(boxed_prev_node),
             Token::QuestionMark => AstNode::QuestionMark(boxed_prev_node),
+            Token::OpeningAmountBracket => {
+                Self::parse_amount_bracket(rest_tokens, boxed_prev_node)?
+            }
             _ => unreachable!(),
         })
     }
@@ -280,6 +299,61 @@ impl Regex {
         Err(RegexCompileError::MissingBracketError(']'))
     }
 
+    fn parse_amount_bracket(
+        tokens: &mut impl Iterator<Item = Token>,
+        boxed_prev_node: Box<AstNode>,
+    ) -> Result<AstNode, RegexCompileError> {
+        let mut next_token = tokens.next().ok_or(RegexCompileError::MissingSymbolError)?;
+
+        let mut min_num = 0usize;
+        while let Token::Literal(c) = next_token {
+            min_num = min_num * 10
+                + c.to_digit(10)
+                    .ok_or(RegexCompileError::UnexpectedSymbolError(c))? as usize;
+
+            next_token = tokens
+                .next()
+                .ok_or(RegexCompileError::MissingBracketError('}'))?;
+        }
+
+        if next_token == Token::ClosingAmountBracket {
+            return Ok(AstNode::Amount(boxed_prev_node, min_num));
+        }
+
+        if next_token != Token::Comma {
+            return Err(RegexCompileError::MissingSymbolError);
+        }
+
+        next_token = tokens
+            .next()
+            .ok_or(RegexCompileError::MissingBracketError('}'))?;
+
+        if next_token == Token::ClosingAmountBracket {
+            return Ok(AstNode::MoreThan(boxed_prev_node, min_num));
+        }
+
+        let mut max_num = 0usize;
+        while let Token::Literal(c) = next_token {
+            max_num = max_num * 10
+                + c.to_digit(10)
+                    .ok_or(RegexCompileError::UnexpectedSymbolError(c))? as usize;
+
+            next_token = tokens
+                .next()
+                .ok_or(RegexCompileError::MissingBracketError('}'))?;
+        }
+
+        if next_token == Token::ClosingAmountBracket {
+            if max_num >= min_num {
+                return Ok(AstNode::Between(boxed_prev_node, min_num, max_num));
+            } else {
+                return Err(RegexCompileError::MinGreaterMaxError);
+            }
+        }
+
+        Err(RegexCompileError::MissingBracketError('}'))
+    }
+
     fn parse_bracket_char(token: Token) -> AstNode {
         match token {
             Token::Literal(c) => AstNode::Literal(c),
@@ -299,6 +373,9 @@ impl Regex {
             Token::Dot => AstNode::Literal('.'),
             Token::QuestionMark => AstNode::Literal('?'),
             Token::Minus => AstNode::Literal('-'),
+            Token::OpeningAmountBracket => AstNode::Literal('{'),
+            Token::ClosingAmountBracket => AstNode::Literal('}'),
+            Token::Comma => AstNode::Literal(','),
             Token::Literal(c) => match c {
                 's' => {
                     let nodes = vec![
@@ -361,8 +438,17 @@ impl Regex {
 
                 transitions.append(&mut gotten_transitions);
 
-                let dfa_node = DfaNode { accepting: false };
-                nodes.push(dfa_node);
+                let node_count = match node {
+                    AstNode::Amount(_, x) | AstNode::MoreThan(_, x) | AstNode::Between(_, _, x) => {
+                        x
+                    }
+                    _ => 1,
+                };
+
+                for _ in 0..node_count {
+                    let dfa_node = DfaNode { accepting: false };
+                    nodes.push(dfa_node);
+                }
             }
         }
 
@@ -436,6 +522,48 @@ impl Regex {
                 let mut fns = vec![];
                 fns.append(&mut Self::get_transitions(child, self_index, prev_index));
                 fns.push((self_index - 1, TransitionFilter::None, self_index + 1));
+                fns
+            }
+            AstNode::Amount(child, amount) => {
+                let mut fns = vec![];
+                for i in 0..*amount {
+                    fns.append(&mut Self::get_transitions(
+                        child,
+                        self_index + i,
+                        prev_index + i,
+                    ))
+                }
+                fns
+            }
+            AstNode::MoreThan(child, min_amount) => {
+                let mut fns = vec![];
+                for i in 0..*min_amount {
+                    fns.append(&mut Self::get_transitions(
+                        child,
+                        self_index + i,
+                        prev_index + i,
+                    ))
+                }
+                fns.append(&mut Self::get_transitions(
+                    child,
+                    self_index + min_amount - 1,
+                    self_index + min_amount - 1,
+                ));
+                fns
+            }
+            AstNode::Between(child, min_amount, max_amount) => {
+                let mut fns = vec![];
+                for i in 0..*max_amount {
+                    fns.append(&mut Self::get_transitions(
+                        child,
+                        self_index + i,
+                        prev_index + i,
+                    ));
+
+                    if i >= min_amount - 1 && i < max_amount - 1 {
+                        fns.push((self_index + i, TransitionFilter::None, self_index + max_amount));
+                    }
+                }
                 fns
             }
             AstNode::Dollar => vec![],
@@ -513,6 +641,18 @@ impl Regex {
             }
             AstNode::Hat => {
                 println!("Hat");
+            }
+            AstNode::Amount(child, amount) => {
+                println!("Amount ({amount}):");
+                Self::pprint_ast(child, indentation_level + 1)
+            }
+            AstNode::MoreThan(child, amount) => {
+                println!("MoreThan ({amount}):");
+                Self::pprint_ast(child, indentation_level + 1)
+            }
+            AstNode::Between(child, min_amount, max_amount) => {
+                println!("Between ({min_amount} to {max_amount}):");
+                Self::pprint_ast(child, indentation_level + 1)
             }
             AstNode::Literal(char) => {
                 println!("Literal '{char}'");
@@ -635,6 +775,34 @@ mod tests {
         assert!(regex.verify("t"));
         assert!(regex.verify("T"));
         assert!(!regex.verify("1"));
+    }
+
+    #[test]
+    fn set_amount_works() {
+        let regex = Regex::new("^a{3}$").unwrap();
+
+        assert!(regex.verify("aaa"));
+        assert!(!regex.verify("aa"));
+        assert!(!regex.verify("aaaa"));
+    }
+
+    #[test]
+    fn more_than_works() {
+        let regex = Regex::new("^a{3,}$").unwrap();
+
+        assert!(regex.verify("aaa"));
+        assert!(regex.verify("aaaa"));
+        assert!(!regex.verify("aa"));
+    }
+
+    #[test]
+    fn between_works() {
+        let regex = Regex::new("^a{3,6}$").unwrap();
+
+        assert!(regex.verify("aaa"));
+        assert!(regex.verify("aaaaaa"));
+        assert!(!regex.verify("aa"));
+        assert!(!regex.verify("aaaaaaa"));
     }
 
     #[test]
