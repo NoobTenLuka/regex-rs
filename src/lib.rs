@@ -641,8 +641,6 @@ mod tests {
     fn complex_regex_works() {
         let regex = Regex::new("^https?://\\w+\\.?[a-zA-Z]+").unwrap();
 
-        println!("{regex}");
-
         assert!(regex.verify("https://google.com"));
         assert!(regex.verify("https://twitch.tv"));
         assert!(!regex.verify("Meine Webseite haha: http://localhost"));
