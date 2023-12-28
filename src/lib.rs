@@ -11,6 +11,7 @@ enum Token {
     QuestionMark,
     Dollar,
     Hat,
+    Minus,
     Literal(char),
 }
 
@@ -43,6 +44,7 @@ type Transition = (usize, TransitionFilter, usize);
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum RegexCompileError {
+    MissingSymbolError,
     MissingBracketError(char),
     UnexpectedSymbolError(char),
     EmptyError,
@@ -149,6 +151,7 @@ impl Regex {
             '\\' => Token::Escape,
             '$' => Token::Dollar,
             '^' => Token::Hat,
+            '-' => Token::Minus,
             x => Token::Literal(x),
         })
     }
@@ -192,10 +195,15 @@ impl Regex {
             }
             Token::Dot => Ok(AstNode::Dot),
             Token::OpeningBracket => Self::parse_bracket(rest_tokens),
-            Token::Escape => Ok(Self::parse_escape(rest_tokens.next().unwrap())),
+            Token::Escape => Ok(Self::parse_escape(
+                rest_tokens
+                    .next()
+                    .ok_or(RegexCompileError::MissingSymbolError)?,
+            )),
             Token::Literal(c) => Ok(AstNode::Literal(c)),
             Token::ClosingBracket => Err(RegexCompileError::UnexpectedSymbolError('}')),
             Token::Hat => Err(RegexCompileError::UnexpectedSymbolError('^')),
+            Token::Minus => Err(RegexCompileError::UnexpectedSymbolError('-')),
             Token::Dollar => {
                 *has_dollar = true;
                 Ok(AstNode::Dollar)
@@ -236,15 +244,47 @@ impl Regex {
         tokens: &mut impl Iterator<Item = Token>,
     ) -> Result<AstNode, RegexCompileError> {
         let mut bracket_chars = Vec::new();
-        for token in tokens {
-            let new_node = match token {
-                Token::Literal(c) => AstNode::Literal(c),
+        while let Some(token) = tokens.next() {
+            match token {
+                Token::Minus => {
+                    let prev_node = bracket_chars
+                        .pop()
+                        .ok_or(RegexCompileError::UnexpectedSymbolError('-'))?;
+                    let next_token = tokens.next().ok_or(RegexCompileError::MissingSymbolError)?;
+                    if next_token == Token::Minus {
+                        return Err(RegexCompileError::UnexpectedSymbolError('-'));
+                    }
+                    let next_node = Self::parse_bracket_char(next_token);
+
+                    if let AstNode::Literal(from) = prev_node {
+                        if let AstNode::Literal(to) = next_node {
+                            for char in from..=to {
+                                bracket_chars.push(AstNode::Literal(char));
+                            }
+                        }
+                    }
+                }
                 Token::ClosingBracket => return Ok(AstNode::Bracket(bracket_chars)),
-                x => Self::parse_escape(x),
+                Token::Escape => {
+                    let new_node = Self::parse_escape(
+                        tokens.next().ok_or(RegexCompileError::MissingSymbolError)?,
+                    );
+                    bracket_chars.push(new_node);
+                }
+                x => {
+                    let new_node = Self::parse_bracket_char(x);
+                    bracket_chars.push(new_node);
+                }
             };
-            bracket_chars.push(new_node)
         }
         Err(RegexCompileError::MissingBracketError(']'))
+    }
+
+    fn parse_bracket_char(token: Token) -> AstNode {
+        match token {
+            Token::Literal(c) => AstNode::Literal(c),
+            x => Self::parse_escape(x),
+        }
     }
 
     fn parse_escape(token: Token) -> AstNode {
@@ -258,6 +298,7 @@ impl Regex {
             Token::Plus => AstNode::Literal('+'),
             Token::Dot => AstNode::Literal('.'),
             Token::QuestionMark => AstNode::Literal('?'),
+            Token::Minus => AstNode::Literal('-'),
             Token::Literal(c) => match c {
                 's' => {
                     let nodes = vec![
@@ -571,6 +612,24 @@ mod tests {
         let regex = Regex::new("[ab");
 
         assert_eq!(regex, Err(RegexCompileError::MissingBracketError(']')));
+    }
+
+    #[test]
+    fn ranges_work() {
+        let regex = Regex::new("^[A-Z]$").unwrap();
+
+        assert!(regex.verify("A"));
+        assert!(regex.verify("T"));
+        assert!(!regex.verify("1"));
+    }
+
+    #[test]
+    fn multiple_ranges_work() {
+        let regex = Regex::new("^[a-zA-Z]$").unwrap();
+
+        assert!(regex.verify("t"));
+        assert!(regex.verify("T"));
+        assert!(!regex.verify("1"));
     }
 
     #[test]
