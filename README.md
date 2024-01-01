@@ -35,9 +35,9 @@ assert!(regex.verify(string_to_verify));
 | `a{3}`   | Exact number matching     | Implemented |
 | `a{3,}`  | More-than number matching | Implemented |
 | `a{3,6}` | Between numbers matching  | Implemented |
-| `[^a-z]` | Not in range matching     | Planned     |
-| `\\S`    | Non-whitespace matching   | Planned     |
-| `\\D`    | Non-digit matching        | Planned     |
-| `\\W`    | Non-word matching         | Planned     |
+| `[^a-z]` | Not in range matching     | Implemented |
+| `\\S`    | Non-whitespace matching   | Implemented |
+| `\\D`    | Non-digit matching        | Implemented |
+| `\\W`    | Non-word matching         | Implemented |
 | `a\|b`   | OR matching               | Planned     |
 | `(.*)`   | Capture groups            | Planned     |

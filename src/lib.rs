@@ -31,6 +31,7 @@ enum AstNode {
     Bracket(Vec<AstNode>),
     Dollar,
     Hat,
+    NotIn(Box<AstNode>),
     Literal(char),
 }
 
@@ -46,7 +47,13 @@ enum TransitionFilter {
     All,
 }
 
-type Transition = (usize, TransitionFilter, usize);
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+enum TransitionTarget {
+    State(usize),
+    Fail,
+}
+
+type Transition = (usize, TransitionFilter, TransitionTarget);
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum RegexCompileError {
@@ -62,7 +69,7 @@ pub enum RegexCompileError {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Regex {
     dfa_nodes: Vec<DfaNode>,
-    dfa_transitions: HashMap<(usize, TransitionFilter), usize>,
+    dfa_transitions: HashMap<(usize, TransitionFilter), TransitionTarget>,
     starts_with_hat: bool,
     ends_with_dollar: bool,
 }
@@ -73,34 +80,42 @@ impl Display for Regex {
         writeln!(f, "Ends with dollar: {:?}", self.ends_with_dollar)?;
 
         for (i, node) in self.dfa_nodes.iter().enumerate() {
-            let to_self: Vec<(&(usize, TransitionFilter), &usize)> = self
+            let mut to_self = self
                 .dfa_transitions
                 .iter()
-                .filter(|((start, _), end)| *start == i && **end == i)
-                .collect();
+                .filter(|((start, _), end)| *start == i && **end == TransitionTarget::State(i));
 
             let to_next = self
                 .dfa_transitions
                 .iter()
-                .filter(|((start, _), end)| *start == i && **end == i + 1);
+                .filter(|((start, _), end)| *start == i && **end == TransitionTarget::State(i + 1));
 
             let to_second_next = self
                 .dfa_transitions
                 .iter()
-                .filter(|((start, _), end)| *start == i && **end == i + 2);
+                .filter(|((start, _), end)| *start == i && **end == TransitionTarget::State(i + 2));
+
+            let to_fail = self
+                .dfa_transitions
+                .iter()
+                .filter(|((start, _), end)| *start == i && **end == TransitionTarget::Fail);
 
             if node.accepting {
                 write!(f, "A")?;
             }
 
             write!(f, "({i:0>3})")?;
-            if !to_self.is_empty() {
-                write!(f, " ⮌")?;
+            if let Some(x) = to_self.next() {
+                write!(f, " ⮌ {:?}", x.0 .1)?;
             }
             for x in to_self {
-                write!(f, " {:?}", x.0 .1)?;
+                write!(f, " ,{:?}", x.0 .1)?;
             }
             writeln!(f)?;
+
+            for x in to_fail {
+                writeln!(f, " ← {:?}", x.0 .1)?;
+            }
 
             for x in to_next {
                 writeln!(f, "  ↓ {:?}", x.0 .1)?;
@@ -263,8 +278,17 @@ impl Regex {
         tokens: &mut impl Iterator<Item = Token>,
     ) -> Result<AstNode, RegexCompileError> {
         let mut bracket_chars = Vec::new();
+        let mut starts_with_hat = false;
         while let Some(token) = tokens.next() {
             match token {
+                Token::Hat => {
+                    if bracket_chars.is_empty() {
+                        starts_with_hat = true;
+                    } else {
+                        let new_node = Self::parse_bracket_char(Token::Hat);
+                        bracket_chars.push(new_node);
+                    }
+                }
                 Token::Minus => {
                     let prev_node = bracket_chars
                         .pop()
@@ -283,7 +307,13 @@ impl Regex {
                         }
                     }
                 }
-                Token::ClosingBracket => return Ok(AstNode::Bracket(bracket_chars)),
+                Token::ClosingBracket => {
+                    return if starts_with_hat {
+                        Ok(AstNode::NotIn(Box::new(AstNode::Bracket(bracket_chars))))
+                    } else {
+                        Ok(AstNode::Bracket(bracket_chars))
+                    }
+                }
                 Token::Escape => {
                     let new_node = Self::parse_escape(
                         tokens.next().ok_or(RegexCompileError::MissingSymbolError)?,
@@ -376,37 +406,44 @@ impl Regex {
             Token::OpeningAmountBracket => AstNode::Literal('{'),
             Token::ClosingAmountBracket => AstNode::Literal('}'),
             Token::Comma => AstNode::Literal(','),
-            Token::Literal(c) => match c {
-                's' => {
-                    let nodes = vec![
-                        AstNode::Literal(' '),
-                        AstNode::Literal('\n'),
-                        AstNode::Literal('\t'),
-                    ];
-                    AstNode::Bracket(nodes)
+            Token::Literal(c) => Self::parse_escaped_group(c),
+        }
+    }
+
+    fn parse_escaped_group(literal: char) -> AstNode {
+        match literal {
+            's' => {
+                let nodes = vec![
+                    AstNode::Literal(' '),
+                    AstNode::Literal('\n'),
+                    AstNode::Literal('\t'),
+                ];
+                AstNode::Bracket(nodes)
+            }
+            'd' => {
+                let mut nodes = vec![];
+                for c in '0'..='9' {
+                    nodes.push(AstNode::Literal(c));
                 }
-                'd' => {
-                    let mut nodes = vec![];
-                    for c in '0'..='9' {
-                        nodes.push(AstNode::Literal(c));
-                    }
-                    AstNode::Bracket(nodes)
+                AstNode::Bracket(nodes)
+            }
+            'w' => {
+                let mut nodes = vec![AstNode::Literal('_')];
+                for c in 'a'..='z' {
+                    nodes.push(AstNode::Literal(c));
                 }
-                'w' => {
-                    let mut nodes = vec![AstNode::Literal('_')];
-                    for c in 'a'..='z' {
-                        nodes.push(AstNode::Literal(c));
-                    }
-                    for c in 'A'..='Z' {
-                        nodes.push(AstNode::Literal(c));
-                    }
-                    for c in '0'..='9' {
-                        nodes.push(AstNode::Literal(c));
-                    }
-                    AstNode::Bracket(nodes)
+                for c in 'A'..='Z' {
+                    nodes.push(AstNode::Literal(c));
                 }
-                x => AstNode::Literal(x),
-            },
+                for c in '0'..='9' {
+                    nodes.push(AstNode::Literal(c));
+                }
+                AstNode::Bracket(nodes)
+            }
+            'S' => AstNode::NotIn(Box::new(Self::parse_escaped_group('s'))),
+            'D' => AstNode::NotIn(Box::new(Self::parse_escaped_group('d'))),
+            'W' => AstNode::NotIn(Box::new(Self::parse_escaped_group('w'))),
+            x => AstNode::Literal(x),
         }
     }
 
@@ -430,7 +467,7 @@ impl Regex {
 
             for node in child_nodes {
                 let mut gotten_transitions =
-                    Self::get_transitions(&node, nodes.len(), nodes.len() - 1);
+                    Self::get_transitions(&node, nodes.len(), nodes.len() - 1, false);
 
                 if gotten_transitions.is_empty() {
                     continue;
@@ -468,17 +505,19 @@ impl Regex {
         {
             transitions_to_remove.push(i);
 
-            if nodes[*t_end].accepting {
-                nodes[*t_start].accepting = true;
+            if let TransitionTarget::State(t_end) = *t_end {
+                if nodes[t_end].accepting {
+                    nodes[*t_start].accepting = true;
+                }
+
+                let mut new = transitions
+                    .iter()
+                    .filter(|(s, _, e)| *s == t_start + 1 && *e == TransitionTarget::State(t_end))
+                    .map(|(s, c, e)| (s - 1, *c, *e))
+                    .collect::<Vec<Transition>>();
+
+                new_transitions.append(&mut new);
             }
-
-            let mut new = transitions
-                .iter()
-                .filter(|(s, _, e)| *s == t_start + 1 && *e == *t_end)
-                .map(|(s, c, e)| (s - 1, *c, *e))
-                .collect::<Vec<Transition>>();
-
-            new_transitions.append(&mut new);
         }
 
         for ttr in transitions_to_remove {
@@ -494,34 +533,67 @@ impl Regex {
         (nodes, transitions, starts_with_hat, ends_with_dollar)
     }
 
-    fn get_transitions(node: &AstNode, self_index: usize, prev_index: usize) -> Vec<Transition> {
+    fn get_transitions(
+        node: &AstNode,
+        self_index: usize,
+        prev_index: usize,
+        to_fail: bool,
+    ) -> Vec<Transition> {
         match node {
-            AstNode::Literal(char) => vec![(prev_index, TransitionFilter::Char(*char), self_index)],
+            AstNode::Literal(char) => vec![(
+                prev_index,
+                TransitionFilter::Char(*char),
+                Self::get_transition_target(self_index, to_fail),
+            )],
             AstNode::Star(child) => {
                 let mut fns = vec![];
-                fns.append(&mut Self::get_transitions(child, self_index, prev_index));
-                fns.append(&mut Self::get_transitions(child, self_index, self_index));
-                fns.push((self_index - 1, TransitionFilter::None, self_index + 1));
+                fns.append(&mut Self::get_transitions(
+                    child, self_index, prev_index, to_fail,
+                ));
+                fns.append(&mut Self::get_transitions(
+                    child, self_index, self_index, to_fail,
+                ));
+                fns.push((
+                    self_index - 1,
+                    TransitionFilter::None,
+                    Self::get_transition_target(self_index + 1, to_fail),
+                ));
                 fns
             }
             AstNode::Plus(child) => {
                 let mut fns = vec![];
-                fns.append(&mut Self::get_transitions(child, self_index, prev_index));
-                fns.append(&mut Self::get_transitions(child, self_index, self_index));
+                fns.append(&mut Self::get_transitions(
+                    child, self_index, prev_index, to_fail,
+                ));
+                fns.append(&mut Self::get_transitions(
+                    child, self_index, self_index, to_fail,
+                ));
                 fns
             }
-            AstNode::Dot => vec![(prev_index, TransitionFilter::All, self_index)],
+            AstNode::Dot => vec![(
+                prev_index,
+                TransitionFilter::All,
+                Self::get_transition_target(self_index, to_fail),
+            )],
             AstNode::Bracket(childs) => {
                 let mut fns = vec![];
                 for child in childs {
-                    fns.append(&mut Self::get_transitions(child, self_index, prev_index))
+                    fns.append(&mut Self::get_transitions(
+                        child, self_index, prev_index, to_fail,
+                    ))
                 }
                 fns
             }
             AstNode::QuestionMark(child) => {
                 let mut fns = vec![];
-                fns.append(&mut Self::get_transitions(child, self_index, prev_index));
-                fns.push((self_index - 1, TransitionFilter::None, self_index + 1));
+                fns.append(&mut Self::get_transitions(
+                    child, self_index, prev_index, to_fail,
+                ));
+                fns.push((
+                    self_index - 1,
+                    TransitionFilter::None,
+                    Self::get_transition_target(self_index + 1, to_fail),
+                ));
                 fns
             }
             AstNode::Amount(child, amount) => {
@@ -531,6 +603,7 @@ impl Regex {
                         child,
                         self_index + i,
                         prev_index + i,
+                        to_fail,
                     ))
                 }
                 fns
@@ -542,12 +615,14 @@ impl Regex {
                         child,
                         self_index + i,
                         prev_index + i,
+                        to_fail,
                     ))
                 }
                 fns.append(&mut Self::get_transitions(
                     child,
                     self_index + min_amount - 1,
                     self_index + min_amount - 1,
+                    to_fail,
                 ));
                 fns
             }
@@ -558,18 +633,43 @@ impl Regex {
                         child,
                         self_index + i,
                         prev_index + i,
+                        to_fail,
                     ));
 
                     if i >= min_amount - 1 && i < max_amount - 1 {
-                        fns.push((self_index + i, TransitionFilter::None, self_index + max_amount));
+                        fns.push((
+                            self_index + i,
+                            TransitionFilter::None,
+                            Self::get_transition_target(self_index + max_amount, to_fail),
+                        ));
                     }
                 }
+                fns
+            }
+            AstNode::NotIn(child) => {
+                let mut fns = vec![];
+                fns.append(&mut Self::get_transitions(
+                    child, self_index, prev_index, true,
+                ));
+                fns.push((
+                    prev_index,
+                    TransitionFilter::All,
+                    TransitionTarget::State(self_index),
+                ));
                 fns
             }
             AstNode::Dollar => vec![],
             AstNode::Hat => vec![],
             AstNode::Root(_) => unreachable!(),
         }
+    }
+
+    fn get_transition_target(state_target: usize, to_fail: bool) -> TransitionTarget {
+        return if to_fail {
+            TransitionTarget::Fail
+        } else {
+            TransitionTarget::State(state_target)
+        };
     }
 
     pub fn verify(&self, input: &str) -> bool {
@@ -588,10 +688,24 @@ impl Regex {
 
             match direct_match {
                 Some(end) if indirect_match.is_none() || Some(&char) != chars.peek() => {
-                    state = *end
+                    match *end {
+                        TransitionTarget::State(end) => state = end,
+                        TransitionTarget::Fail => {
+                            if self.starts_with_hat {
+                                return false;
+                            } else {
+                                state = 0
+                            }
+                        }
+                    }
                 }
                 _ => match indirect_match {
-                    Some(end) => state = *end,
+                    Some(end) => {
+                        // Other case can not exist anyway
+                        if let TransitionTarget::State(end) = *end {
+                            state = end;
+                        }
+                    }
                     None => {
                         if self.starts_with_hat {
                             return false;
@@ -652,6 +766,10 @@ impl Regex {
             }
             AstNode::Between(child, min_amount, max_amount) => {
                 println!("Between ({min_amount} to {max_amount}):");
+                Self::pprint_ast(child, indentation_level + 1)
+            }
+            AstNode::NotIn(child) => {
+                println!("NotIn:");
                 Self::pprint_ast(child, indentation_level + 1)
             }
             AstNode::Literal(char) => {
@@ -803,6 +921,22 @@ mod tests {
         assert!(regex.verify("aaaaaa"));
         assert!(!regex.verify("aa"));
         assert!(!regex.verify("aaaaaaa"));
+    }
+
+    #[test]
+    fn not_in_works() {
+        let regex = Regex::new("^[^a-z]$").unwrap();
+
+        assert!(regex.verify("A"));
+        assert!(!regex.verify("a"));
+    }
+
+    #[test]
+    fn not_in_digits_works() {
+        let regex = Regex::new("^\\D*$").unwrap();
+
+        assert!(regex.verify("abc"));
+        assert!(!regex.verify("a1c"));
     }
 
     #[test]
