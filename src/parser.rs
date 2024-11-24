@@ -1,8 +1,8 @@
-use std::io::{self, BufWriter, Stdout, Write};
+use std::io::{BufWriter, Write};
 
 use crate::{RegexCompileError, Token};
 
-struct RegexAst {
+pub struct RegexAst {
     has_hat: bool,
     has_dollar: bool,
     body: Body
@@ -41,11 +41,12 @@ enum Atom {
     Range {
         inverted: bool,
         ranges: Vec<Range>
-    }
+    },
+    All
 }
 
 enum Range {
-    Symbol(Symbol),
+    Char(char),
     FromTo {
         from: char,
         to: char
@@ -96,6 +97,13 @@ impl<I: Iterator<Item = Token>> LL1Parser<I> {
         Ok(())
     }
 
+    fn get_and_accept(&mut self) -> Result<Token, RegexCompileError> {
+        let last = self.current_token.clone();
+        self.accept_it()?;
+
+        Ok(last)
+    }
+
     // regex ::= '^'? body '$'?
     pub fn parse(&mut self) -> Result<RegexAst, RegexCompileError> {
         let has_hat = if matches!(self.current_token, Token::Hat) {
@@ -108,7 +116,7 @@ impl<I: Iterator<Item = Token>> LL1Parser<I> {
         let body = self.parse_body()?;
 
         let has_dollar = if matches!(self.current_token, Token::Dollar) {
-            self.accept_it();
+            self.accept_it()?;
             true
         } else {
             false
@@ -126,7 +134,7 @@ impl<I: Iterator<Item = Token>> LL1Parser<I> {
         disjunctives.push(self.parse_expressions()?);
 
         while self.current_token == Token::Bar {
-            self.accept_it();
+            self.accept_it()?;
             disjunctives.push(self.parse_expressions()?);
         }
 
@@ -140,7 +148,7 @@ impl<I: Iterator<Item = Token>> LL1Parser<I> {
         let mut expressions = Vec::new();
 
         // The same tokens needed for matching an atom
-        while matches!(self.current_token, Token::Literal(_) | Token::OpeningParentheses | Token::OpeningBracket | Token::Escape) {
+        while matches!(self.current_token, Token::Literal(_) | Token::Dot | Token::OpeningParentheses | Token::OpeningBracket | Token::Escape) {
             expressions.push(self.parse_expr()?);
         }
 
@@ -181,11 +189,16 @@ impl<I: Iterator<Item = Token>> LL1Parser<I> {
         Ok(Expression { atom, expr_type })
     }
 
-    // atom ::= symbol | '(' body ')' | '[' rangeExpr ']'
+    // atom ::= ( symbol | '.' ) | '(' body ')' | '[' rangeExpr ']'
     fn parse_atom(&mut self) -> Result<Atom, RegexCompileError> {
         Ok(match self.current_token {
             Token::Escape | Token::Literal(_) => {
                 Atom::Symbol(self.parse_symbol()?)
+            }
+            Token::Dot => {
+                self.accept_it()?;
+
+                Atom::All
             }
             Token::OpeningBracket => {
                 self.accept_it()?;
@@ -257,25 +270,50 @@ impl<I: Iterator<Item = Token>> LL1Parser<I> {
         Ok((inverted, ranges))
     }
 
-    // symbol ('-' literal)?
+    // range_literal ('-' literal)?
     fn parse_inner_range(&mut self) -> Result<Range, RegexCompileError> {
-        let start = self.parse_symbol()?;
+        let start = self.parse_range_literal()?;
 
         if self.current_token == Token::Minus {
-            let start = if let Symbol::Literal(x) = start {
-                x
-            } else {
-                return Err(RegexCompileError::EmptyError) // TODO: make an error like unallowed
-                                                          // escape group error
-            };
-
-            self.accept_it();
+            self.accept_it()?;
             let end = self.accept_lit()?;
 
             return Ok(Range::FromTo { from: start, to: end })
         } 
 
-        return Ok(Range::Symbol(start))
+        return Ok(Range::Char(start))
+    }
+
+    fn parse_range_literal(&mut self) -> Result<char, RegexCompileError> {
+        if let Token::Literal(x) = self.current_token {
+            self.accept_it()?;
+            Ok(x)
+        } else if self.current_token == Token::Escape {
+            self.accept_it()?;
+            match self.get_and_accept()? {
+                Token::EOL => {
+                    return Err(RegexCompileError::EmptyError)
+                },
+                Token::Literal(_) => {
+                    return Err(RegexCompileError::MissingSymbolError) // TODO: Replace with error
+                                                                      // about escape groups being
+                                                                      // unallowed
+                }
+                x => {
+                    Ok(Self::token_to_literal(x)?)
+                }
+            }
+        } else {
+            match self.get_and_accept()? {
+                Token::EOL => {
+                    return Err(RegexCompileError::EmptyError)
+                },
+                Token::Literal(_) => unreachable!("Literal has to be parsed before this else case"),
+                x => {
+                    Ok(Self::token_to_literal(x)?)
+                }
+            }
+        }
     }
 
     // literal | '\'.
@@ -287,7 +325,21 @@ impl<I: Iterator<Item = Token>> LL1Parser<I> {
 
         self.accept(Token::Escape)?;
 
-        return Ok(Symbol::Literal(match self.current_token {
+        return Ok(match self.get_and_accept()? {
+            Token::EOL => {
+                return Err(RegexCompileError::EmptyError)
+            },
+            Token::Literal(x) => {
+                Symbol::EscapeGroup(x)
+            }
+            x => {
+                Symbol::Literal(Self::token_to_literal(x)?)
+            }
+        })
+    }
+
+    fn token_to_literal(token: Token) -> Result<char, RegexCompileError> {
+        Ok(match token {
             Token::Star => '*',
             Token::Plus => '+',
             Token::Dot => '.',
@@ -304,47 +356,50 @@ impl<I: Iterator<Item = Token>> LL1Parser<I> {
             Token::Minus => '-',
             Token::Bar => '|',
             Token::Comma => ',',
+            Token::Literal(x) => x,
             Token::EOL => {
                 return Err(RegexCompileError::EmptyError)
             },
-            Token::Literal(x) => {
-                return Ok(Symbol::EscapeGroup(x))
-            }
-        }))
+        })
     }
 }
 
-struct PrettyPrinter<T: Write> {
+pub struct PrettyPrinter<T: Write> {
     buf: BufWriter<T>
 }
 
 impl<T: Write> PrettyPrinter<T> {
-    pub fn pretty_print_ast(&mut self, ast: RegexAst, original: &str) {
+    pub fn new(buf: BufWriter<T>) -> Self {
+        PrettyPrinter { buf }
+    }
+
+    pub fn pretty_print_ast(&mut self, ast: &RegexAst, original: &str) {
         writeln!(&mut self.buf, "Abstract Syntax Tree for {}", original);
         writeln!(&mut self.buf, "Starts with Hat: {}", ast.has_hat);
         writeln!(&mut self.buf, "Ends with Dollar: {}", ast.has_dollar);
-        self.pp_body(ast.body, 0);
+        self.pp_body(&ast.body, 0);
+        self.buf.flush();
     }
 
-    fn pp_body(&mut self, body: Body, indentation_level: usize) {
+    fn pp_body(&mut self, body: &Body, indentation_level: usize) {
         write!(&mut self.buf, "{}", "| ".repeat(indentation_level));
         writeln!(&mut self.buf, "Body:");
-        for disjunctive in body.disjunctives {
+        for disjunctive in &body.disjunctives {
             self.pp_disjunctive(disjunctive, indentation_level + 1);
         }
     }
 
-    fn pp_disjunctive(&mut self, disjunctive: Expressions, indentation_level: usize) {
+    fn pp_disjunctive(&mut self, disjunctive: &Expressions, indentation_level: usize) {
         write!(&mut self.buf, "{}", "| ".repeat(indentation_level));
         writeln!(&mut self.buf, "Expressions:");
-        for expression in disjunctive.expressions {
+        for expression in &disjunctive.expressions {
             self.pp_expression(expression, indentation_level + 1);
         }
     }
 
-    fn pp_expression(&mut self, expr: Expression, indentation_level: usize) {
+    fn pp_expression(&mut self, expr: &Expression, indentation_level: usize) {
         write!(&mut self.buf, "{}", "| ".repeat(indentation_level));
-        match expr.expr_type {
+        match &expr.expr_type {
             ExpressionType::Single => {
                 writeln!(&mut self.buf, "Single:");
             },
@@ -371,10 +426,53 @@ impl<T: Write> PrettyPrinter<T> {
                 }
             },
         }
-        self.pp_atom(expr.atom, indentation_level + 1);
+        self.pp_atom(&expr.atom, indentation_level + 1);
     }
 
-    fn pp_atom(&mut self, atom: Atom, indentation_level: usize) {
-        
+    fn pp_atom(&mut self, atom: &Atom, indentation_level: usize) {
+        write!(&mut self.buf, "{}", "| ".repeat(indentation_level));
+        match atom {
+            Atom::Symbol(sym) => {
+                writeln!(&mut self.buf, "Symbol Atom:");
+                self.pp_symbol(sym, indentation_level + 1);
+            },
+            Atom::Group(body) => {
+                writeln!(&mut self.buf, "Group Atom:");
+                self.pp_body(body, indentation_level + 1);
+            },
+            Atom::Range { inverted, ranges } => {
+                writeln!(&mut self.buf, "Range Atom (inverted: {}):", inverted);
+                for range in ranges {
+                    self.pp_range(range, indentation_level + 1);
+                }
+            },
+            Atom::All => {
+                writeln!(&mut self.buf, "All Atom:");
+            }
+        }
+    }
+
+    fn pp_symbol(&mut self, symbol: &Symbol, indentation_level: usize) {
+        write!(&mut self.buf, "{}", "| ".repeat(indentation_level));
+        match symbol {
+            Symbol::EscapeGroup(x) => {
+                writeln!(&mut self.buf, "Escape Group '{}'", x);
+            },
+            Symbol::Literal(x) => {
+                writeln!(&mut self.buf, "Literal '{}'", x);
+            },
+        }
+    }
+
+    fn pp_range(&mut self, range: &Range, indentation_level: usize) {
+        write!(&mut self.buf, "{}", "| ".repeat(indentation_level));
+        match range {
+            Range::Char(sym) => {
+                writeln!(&mut self.buf, "Symbol Range ({})", sym);
+            },
+            Range::FromTo { from, to } => {
+                writeln!(&mut self.buf, "FromTo Range ({} - {})", from, to);
+            },
+        }
     }
 }

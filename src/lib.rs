@@ -1,10 +1,10 @@
 mod parser;
 
-use std::{collections::HashMap, fmt::Display, iter};
+use std::{collections::HashMap, fmt::Display, io::{stdout, BufWriter}, iter};
 
-use parser::LL1Parser;
+use parser::{LL1Parser, PrettyPrinter};
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Clone)]
 enum Token {
     Star,
     Plus,
@@ -132,25 +132,28 @@ impl Regex {
     }
 
     pub fn new_with_options(regex: &str, options: RegexOptions) -> Result<Self, RegexCompileError> {
-        let mut token_stream = Self::lex(regex);
+        let token_stream = Self::lex(regex);
 
-        let parser = LL1Parser::new(token_stream)?;
+        let mut parser = LL1Parser::new(token_stream)?;
         let ast = parser.parse()?;
 
-        if options.pretty_print_ast {
-            Self::pprint_ast(&ast, 0);
+        if true /*options.pretty_print_ast */{
+            let mut pp = PrettyPrinter::new(BufWriter::new(stdout()));
+            pp.pretty_print_ast(&ast, regex);
         }
 
-        let (dfa_nodes, dfa_transitions, starts_with_hat, ends_with_dollar) = Self::codegen(ast);
+        todo!();
 
-        Ok(Regex {
-            dfa_nodes,
-            dfa_transitions: HashMap::from_iter(
-                dfa_transitions.iter().map(|(s, t, e)| ((*s, *t), *e)),
-            ),
-            starts_with_hat,
-            ends_with_dollar,
-        })
+        //let (dfa_nodes, dfa_transitions, starts_with_hat, ends_with_dollar) = Self::codegen(ast);
+
+        // Ok(Regex {
+        //     dfa_nodes,
+        //     dfa_transitions: HashMap::from_iter(
+        //         dfa_transitions.iter().map(|(s, t, e)| ((*s, *t), *e)),
+        //     ),
+        //     starts_with_hat,
+        //     ends_with_dollar,
+        // })
     }
 
     // Input String -> Token Stream
@@ -177,221 +180,221 @@ impl Regex {
     }
 
     // Abstract Sytax Tree -> Deterministic Finite Automaton
-    fn codegen(root: AstNode) -> (Vec<DfaNode>, Vec<Transition>, bool, bool) {
-        let mut nodes = Vec::new();
-        let mut transitions = Vec::new();
-        let start_node = DfaNode { accepting: false };
-        nodes.push(start_node);
-
-        let mut starts_with_hat = false;
-        let mut ends_with_dollar = false;
-
-        if let AstNode::Root(child_nodes) = root {
-            if child_nodes[0] == AstNode::Hat {
-                starts_with_hat = true;
-            }
-            if *child_nodes.last().unwrap() == AstNode::Dollar {
-                ends_with_dollar = true;
-            }
-
-            for node in child_nodes {
-                let mut gotten_transitions =
-                    Self::get_transitions(&node, nodes.len(), nodes.len() - 1, false);
-
-                if gotten_transitions.is_empty() {
-                    continue;
-                }
-
-                transitions.append(&mut gotten_transitions);
-
-                let node_count = match node {
-                    AstNode::Amount(_, x) | AstNode::MoreThan(_, x) | AstNode::Between(_, _, x) => {
-                        x
-                    }
-                    _ => 1,
-                };
-
-                for _ in 0..node_count {
-                    let dfa_node = DfaNode { accepting: false };
-                    nodes.push(dfa_node);
-                }
-            }
-        }
-
-        let last_index = nodes.len() - 1;
-
-        let end_node = DfaNode { accepting: true };
-        nodes.push(end_node);
-
-        let mut new_transitions = Vec::new();
-        let mut transitions_to_remove = Vec::new();
-
-        for (i, (t_start, _, t_end)) in transitions
-            .iter()
-            .enumerate()
-            .filter(|(_, (_, c, _))| *c == TransitionFilter::None)
-            .rev()
-        {
-            transitions_to_remove.push(i);
-
-            if let TransitionTarget::State(t_end) = *t_end {
-                if nodes[t_end].accepting {
-                    nodes[*t_start].accepting = true;
-                }
-
-                let mut new = transitions
-                    .iter()
-                    .filter(|(s, _, e)| *s == t_start + 1 && *e == TransitionTarget::State(t_end))
-                    .map(|(s, c, e)| (s - 1, *c, *e))
-                    .collect::<Vec<Transition>>();
-
-                new_transitions.append(&mut new);
-            }
-        }
-
-        for ttr in transitions_to_remove {
-            transitions.remove(ttr);
-        }
-
-        transitions.append(&mut new_transitions);
-
-        nodes.remove(last_index + 1);
-
-        nodes[last_index].accepting = true;
-
-        (nodes, transitions, starts_with_hat, ends_with_dollar)
-    }
-
-    fn get_transitions(
-        node: &AstNode,
-        self_index: usize,
-        prev_index: usize,
-        to_fail: bool,
-    ) -> Vec<Transition> {
-        match node {
-            AstNode::Literal(char) => vec![(
-                prev_index,
-                TransitionFilter::Char(*char),
-                Self::get_transition_target(self_index, to_fail),
-            )],
-            AstNode::Star(child) => {
-                let mut fns = vec![];
-                fns.append(&mut Self::get_transitions(
-                    child, self_index, prev_index, to_fail,
-                ));
-                fns.append(&mut Self::get_transitions(
-                    child, self_index, self_index, to_fail,
-                ));
-                fns.push((
-                    self_index - 1,
-                    TransitionFilter::None,
-                    Self::get_transition_target(self_index + 1, to_fail),
-                ));
-                fns
-            }
-            AstNode::Plus(child) => {
-                let mut fns = vec![];
-                fns.append(&mut Self::get_transitions(
-                    child, self_index, prev_index, to_fail,
-                ));
-                fns.append(&mut Self::get_transitions(
-                    child, self_index, self_index, to_fail,
-                ));
-                fns
-            }
-            AstNode::Dot => vec![(
-                prev_index,
-                TransitionFilter::All,
-                Self::get_transition_target(self_index, to_fail),
-            )],
-            AstNode::Bracket(childs) => {
-                let mut fns = vec![];
-                for child in childs {
-                    fns.append(&mut Self::get_transitions(
-                        child, self_index, prev_index, to_fail,
-                    ))
-                }
-                fns
-            }
-            AstNode::QuestionMark(child) => {
-                let mut fns = vec![];
-                fns.append(&mut Self::get_transitions(
-                    child, self_index, prev_index, to_fail,
-                ));
-                fns.push((
-                    self_index - 1,
-                    TransitionFilter::None,
-                    Self::get_transition_target(self_index + 1, to_fail),
-                ));
-                fns
-            }
-            AstNode::Amount(child, amount) => {
-                let mut fns = vec![];
-                for i in 0..*amount {
-                    fns.append(&mut Self::get_transitions(
-                        child,
-                        self_index + i,
-                        prev_index + i,
-                        to_fail,
-                    ))
-                }
-                fns
-            }
-            AstNode::MoreThan(child, min_amount) => {
-                let mut fns = vec![];
-                for i in 0..*min_amount {
-                    fns.append(&mut Self::get_transitions(
-                        child,
-                        self_index + i,
-                        prev_index + i,
-                        to_fail,
-                    ))
-                }
-                fns.append(&mut Self::get_transitions(
-                    child,
-                    self_index + min_amount - 1,
-                    self_index + min_amount - 1,
-                    to_fail,
-                ));
-                fns
-            }
-            AstNode::Between(child, min_amount, max_amount) => {
-                let mut fns = vec![];
-                for i in 0..*max_amount {
-                    fns.append(&mut Self::get_transitions(
-                        child,
-                        self_index + i,
-                        prev_index + i,
-                        to_fail,
-                    ));
-
-                    if i >= min_amount - 1 && i < max_amount - 1 {
-                        fns.push((
-                            self_index + i,
-                            TransitionFilter::None,
-                            Self::get_transition_target(self_index + max_amount, to_fail),
-                        ));
-                    }
-                }
-                fns
-            }
-            AstNode::NotIn(child) => {
-                let mut fns = vec![];
-                fns.append(&mut Self::get_transitions(
-                    child, self_index, prev_index, true,
-                ));
-                fns.push((
-                    prev_index,
-                    TransitionFilter::All,
-                    TransitionTarget::State(self_index),
-                ));
-                fns
-            }
-            AstNode::Dollar => vec![],
-            AstNode::Hat => vec![],
-            AstNode::Root(_) => unreachable!(),
-        }
-    }
+    // fn codegen(root: AstNode) -> (Vec<DfaNode>, Vec<Transition>, bool, bool) {
+    //     let mut nodes = Vec::new();
+    //     let mut transitions = Vec::new();
+    //     let start_node = DfaNode { accepting: false };
+    //     nodes.push(start_node);
+    //
+    //     let mut starts_with_hat = false;
+    //     let mut ends_with_dollar = false;
+    //
+    //     if let AstNode::Root(child_nodes) = root {
+    //         if child_nodes[0] == AstNode::Hat {
+    //             starts_with_hat = true;
+    //         }
+    //         if *child_nodes.last().unwrap() == AstNode::Dollar {
+    //             ends_with_dollar = true;
+    //         }
+    //
+    //         for node in child_nodes {
+    //             let mut gotten_transitions =
+    //                 Self::get_transitions(&node, nodes.len(), nodes.len() - 1, false);
+    //
+    //             if gotten_transitions.is_empty() {
+    //                 continue;
+    //             }
+    //
+    //             transitions.append(&mut gotten_transitions);
+    //
+    //             let node_count = match node {
+    //                 AstNode::Amount(_, x) | AstNode::MoreThan(_, x) | AstNode::Between(_, _, x) => {
+    //                     x
+    //                 }
+    //                 _ => 1,
+    //             };
+    //
+    //             for _ in 0..node_count {
+    //                 let dfa_node = DfaNode { accepting: false };
+    //                 nodes.push(dfa_node);
+    //             }
+    //         }
+    //     }
+    //
+    //     let last_index = nodes.len() - 1;
+    //
+    //     let end_node = DfaNode { accepting: true };
+    //     nodes.push(end_node);
+    //
+    //     let mut new_transitions = Vec::new();
+    //     let mut transitions_to_remove = Vec::new();
+    //
+    //     for (i, (t_start, _, t_end)) in transitions
+    //         .iter()
+    //         .enumerate()
+    //         .filter(|(_, (_, c, _))| *c == TransitionFilter::None)
+    //         .rev()
+    //     {
+    //         transitions_to_remove.push(i);
+    //
+    //         if let TransitionTarget::State(t_end) = *t_end {
+    //             if nodes[t_end].accepting {
+    //                 nodes[*t_start].accepting = true;
+    //             }
+    //
+    //             let mut new = transitions
+    //                 .iter()
+    //                 .filter(|(s, _, e)| *s == t_start + 1 && *e == TransitionTarget::State(t_end))
+    //                 .map(|(s, c, e)| (s - 1, *c, *e))
+    //                 .collect::<Vec<Transition>>();
+    //
+    //             new_transitions.append(&mut new);
+    //         }
+    //     }
+    //
+    //     for ttr in transitions_to_remove {
+    //         transitions.remove(ttr);
+    //     }
+    //
+    //     transitions.append(&mut new_transitions);
+    //
+    //     nodes.remove(last_index + 1);
+    //
+    //     nodes[last_index].accepting = true;
+    //
+    //     (nodes, transitions, starts_with_hat, ends_with_dollar)
+    // }
+    //
+    // fn get_transitions(
+    //     node: &AstNode,
+    //     self_index: usize,
+    //     prev_index: usize,
+    //     to_fail: bool,
+    // ) -> Vec<Transition> {
+    //     match node {
+    //         AstNode::Literal(char) => vec![(
+    //             prev_index,
+    //             TransitionFilter::Char(*char),
+    //             Self::get_transition_target(self_index, to_fail),
+    //         )],
+    //         AstNode::Star(child) => {
+    //             let mut fns = vec![];
+    //             fns.append(&mut Self::get_transitions(
+    //                 child, self_index, prev_index, to_fail,
+    //             ));
+    //             fns.append(&mut Self::get_transitions(
+    //                 child, self_index, self_index, to_fail,
+    //             ));
+    //             fns.push((
+    //                 self_index - 1,
+    //                 TransitionFilter::None,
+    //                 Self::get_transition_target(self_index + 1, to_fail),
+    //             ));
+    //             fns
+    //         }
+    //         AstNode::Plus(child) => {
+    //             let mut fns = vec![];
+    //             fns.append(&mut Self::get_transitions(
+    //                 child, self_index, prev_index, to_fail,
+    //             ));
+    //             fns.append(&mut Self::get_transitions(
+    //                 child, self_index, self_index, to_fail,
+    //             ));
+    //             fns
+    //         }
+    //         AstNode::Dot => vec![(
+    //             prev_index,
+    //             TransitionFilter::All,
+    //             Self::get_transition_target(self_index, to_fail),
+    //         )],
+    //         AstNode::Bracket(childs) => {
+    //             let mut fns = vec![];
+    //             for child in childs {
+    //                 fns.append(&mut Self::get_transitions(
+    //                     child, self_index, prev_index, to_fail,
+    //                 ))
+    //             }
+    //             fns
+    //         }
+    //         AstNode::QuestionMark(child) => {
+    //             let mut fns = vec![];
+    //             fns.append(&mut Self::get_transitions(
+    //                 child, self_index, prev_index, to_fail,
+    //             ));
+    //             fns.push((
+    //                 self_index - 1,
+    //                 TransitionFilter::None,
+    //                 Self::get_transition_target(self_index + 1, to_fail),
+    //             ));
+    //             fns
+    //         }
+    //         AstNode::Amount(child, amount) => {
+    //             let mut fns = vec![];
+    //             for i in 0..*amount {
+    //                 fns.append(&mut Self::get_transitions(
+    //                     child,
+    //                     self_index + i,
+    //                     prev_index + i,
+    //                     to_fail,
+    //                 ))
+    //             }
+    //             fns
+    //         }
+    //         AstNode::MoreThan(child, min_amount) => {
+    //             let mut fns = vec![];
+    //             for i in 0..*min_amount {
+    //                 fns.append(&mut Self::get_transitions(
+    //                     child,
+    //                     self_index + i,
+    //                     prev_index + i,
+    //                     to_fail,
+    //                 ))
+    //             }
+    //             fns.append(&mut Self::get_transitions(
+    //                 child,
+    //                 self_index + min_amount - 1,
+    //                 self_index + min_amount - 1,
+    //                 to_fail,
+    //             ));
+    //             fns
+    //         }
+    //         AstNode::Between(child, min_amount, max_amount) => {
+    //             let mut fns = vec![];
+    //             for i in 0..*max_amount {
+    //                 fns.append(&mut Self::get_transitions(
+    //                     child,
+    //                     self_index + i,
+    //                     prev_index + i,
+    //                     to_fail,
+    //                 ));
+    //
+    //                 if i >= min_amount - 1 && i < max_amount - 1 {
+    //                     fns.push((
+    //                         self_index + i,
+    //                         TransitionFilter::None,
+    //                         Self::get_transition_target(self_index + max_amount, to_fail),
+    //                     ));
+    //                 }
+    //             }
+    //             fns
+    //         }
+    //         AstNode::NotIn(child) => {
+    //             let mut fns = vec![];
+    //             fns.append(&mut Self::get_transitions(
+    //                 child, self_index, prev_index, true,
+    //             ));
+    //             fns.push((
+    //                 prev_index,
+    //                 TransitionFilter::All,
+    //                 TransitionTarget::State(self_index),
+    //             ));
+    //             fns
+    //         }
+    //         AstNode::Dollar => vec![],
+    //         AstNode::Hat => vec![],
+    //         AstNode::Root(_) => unreachable!(),
+    //     }
+    // }
 
     fn get_transition_target(state_target: usize, to_fail: bool) -> TransitionTarget {
         return if to_fail {
@@ -447,81 +450,6 @@ impl Regex {
         }
         self.dfa_nodes[state].accepting
     }
-
-    fn pprint_ast(node: &AstNode, indentation_level: usize) {
-        print!("{}", "  ".repeat(indentation_level));
-        match node {
-            AstNode::Regex(hat, body, dollar) => {
-                if *hat {
-                    println!("With Hat");
-                }
-                if *dollar {
-                    println!("With Dollar");
-                }
-
-                Self::pprint_ast(body, indentation_level)
-            }
-            AstNode::Or(childs) => {
-                println!("Or:");
-                for child in childs {
-                    Self::pprint_ast(child, indentation_level + 1)
-                }
-            }
-            AstNode::Root(childs) => {
-                println!("Root:");
-                for child in childs {
-                    Self::pprint_ast(child, indentation_level + 1)
-                }
-                println!();
-            }
-            AstNode::Star(child) => {
-                println!("Star:");
-                Self::pprint_ast(child, indentation_level + 1)
-            }
-            AstNode::Plus(child) => {
-                println!("Plus:");
-                Self::pprint_ast(child, indentation_level + 1)
-            }
-            AstNode::Dot => {
-                println!("Dot");
-            }
-            AstNode::Bracket(childs) => {
-                println!("Bracket:");
-                for child in childs {
-                    Self::pprint_ast(child, indentation_level + 1)
-                }
-            }
-            AstNode::QuestionMark(child) => {
-                println!("QuestionMark:");
-                Self::pprint_ast(child, indentation_level + 1)
-            }
-            AstNode::Dollar => {
-                println!("Dollar");
-            }
-            AstNode::Hat => {
-                println!("Hat");
-            }
-            AstNode::Amount(child, amount) => {
-                println!("Amount ({amount}):");
-                Self::pprint_ast(child, indentation_level + 1)
-            }
-            AstNode::MoreThan(child, amount) => {
-                println!("MoreThan ({amount}):");
-                Self::pprint_ast(child, indentation_level + 1)
-            }
-            AstNode::Between(child, min_amount, max_amount) => {
-                println!("Between ({min_amount} to {max_amount}):");
-                Self::pprint_ast(child, indentation_level + 1)
-            }
-            AstNode::NotIn(child) => {
-                println!("NotIn:");
-                Self::pprint_ast(child, indentation_level + 1)
-            }
-            AstNode::Literal(char) => {
-                println!("Literal '{char}'");
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -537,7 +465,7 @@ mod tests {
 
     #[test]
     fn simple_regex_works() {
-        let regex = Regex::new("abc").unwrap();
+        let regex = Regex::new_with_options("abc", crate::RegexOptions { pretty_print_ast: true }).unwrap();
 
         assert!(regex.verify("There must be abc in here"));
         assert!(!regex.verify("No ab followed by c in here"));
@@ -686,7 +614,7 @@ mod tests {
 
     #[test]
     fn complex_regex_works() {
-        let regex = Regex::new("^https?://\\w+\\.?[a-zA-Z]+").unwrap();
+        let regex = Regex::new("^https?://\\w+(\\.[a-zA-Z]+)?").unwrap();
 
         assert!(regex.verify("https://google.com"));
         assert!(regex.verify("https://twitch.tv"));
