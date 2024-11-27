@@ -1,11 +1,27 @@
 mod parser;
 
-use std::{collections::HashMap, fmt::Display, io::{stdout, BufWriter}, iter};
+use std::{
+    collections::HashMap,
+    fmt::Display,
+    io::{stdout, BufWriter},
+    iter,
+    num::ParseIntError,
+};
 
 use parser::{LL1Parser, PrettyPrinter};
 
 #[derive(PartialEq, Eq, Clone)]
-enum Token {
+struct Token {
+    location: SourceLocation,
+    ttype: TokenType,
+    char: char,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+struct SourceLocation(usize);
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum TokenType {
     Star,
     Plus,
     Dot,
@@ -23,7 +39,7 @@ enum Token {
     Bar,
     Comma,
     EOL,
-    Literal(char),
+    Literal,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -47,14 +63,31 @@ enum TransitionTarget {
 type Transition = (usize, TransitionFilter, TransitionTarget);
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum RegexCompileError {
-    MissingSymbolError,
-    MissingBracketError(char),
-    UnexpectedSymbolError(char),
-    EmptyError,
-    SymbolAfterDollarError,
-    DanglingModifierError,
-    MinGreaterMaxError,
+pub struct RegexCompileError {
+    location: SourceLocation,
+    error_type: RegexCompileErrorType,
+}
+
+impl RegexCompileError {
+    fn new(location: SourceLocation, error_type: RegexCompileErrorType) -> Self {
+        Self {
+            location,
+            error_type,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum RegexCompileErrorType {
+    Syntax {
+        actual: TokenType,
+        expected: Vec<TokenType>,
+    },
+    UnexpectedEOL,
+    IntegerParsing(ParseIntError),
+    EscapeGroupInRange {
+        group: char,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -137,7 +170,9 @@ impl Regex {
         let mut parser = LL1Parser::new(token_stream)?;
         let ast = parser.parse()?;
 
-        if true /*options.pretty_print_ast */{
+        if true
+        /*options.pretty_print_ast */
+        {
             let mut pp = PrettyPrinter::new(BufWriter::new(stdout()));
             pp.pretty_print_ast(&ast, regex);
         }
@@ -158,25 +193,37 @@ impl Regex {
 
     // Input String -> Token Stream
     fn lex(source: &str) -> impl Iterator<Item = Token> + '_ {
-        source.chars().map(|c| match c {
-            '*' => Token::Star,
-            '+' => Token::Plus,
-            '.' => Token::Dot,
-            '[' => Token::OpeningBracket,
-            ']' => Token::ClosingBracket,
-            '{' => Token::OpeningAmountBracket,
-            '}' => Token::ClosingAmountBracket,
-            '(' => Token::OpeningParentheses,
-            ')' => Token::ClosingParantheses,
-            '?' => Token::QuestionMark,
-            '\\' => Token::Escape,
-            '|' => Token::Bar,
-            '$' => Token::Dollar,
-            '^' => Token::Hat,
-            '-' => Token::Minus,
-            ',' => Token::Comma,
-            x => Token::Literal(x),
-        }).chain(iter::once(Token::EOL))
+        source
+            .chars()
+            .enumerate()
+            .map(|(i, c)| Token {
+                char: c,
+                location: SourceLocation(i),
+                ttype: match c {
+                    '*' => TokenType::Star,
+                    '+' => TokenType::Plus,
+                    '.' => TokenType::Dot,
+                    '[' => TokenType::OpeningBracket,
+                    ']' => TokenType::ClosingBracket,
+                    '{' => TokenType::OpeningAmountBracket,
+                    '}' => TokenType::ClosingAmountBracket,
+                    '(' => TokenType::OpeningParentheses,
+                    ')' => TokenType::ClosingParantheses,
+                    '?' => TokenType::QuestionMark,
+                    '\\' => TokenType::Escape,
+                    '|' => TokenType::Bar,
+                    '$' => TokenType::Dollar,
+                    '^' => TokenType::Hat,
+                    '-' => TokenType::Minus,
+                    ',' => TokenType::Comma,
+                    _ => TokenType::Literal,
+                },
+            })
+            .chain(iter::once(Token {
+                char: '\n',
+                location: SourceLocation(source.len() + 1),
+                ttype: TokenType::EOL,
+            }))
     }
 
     // Abstract Sytax Tree -> Deterministic Finite Automaton
@@ -457,15 +504,14 @@ mod tests {
     use crate::{Regex, RegexCompileError};
 
     #[test]
-    fn empty_regex_fails() {
-        let regex = Regex::new("");
-
-        assert_eq!(regex, Err(RegexCompileError::EmptyError));
-    }
-
-    #[test]
     fn simple_regex_works() {
-        let regex = Regex::new_with_options("abc", crate::RegexOptions { pretty_print_ast: true }).unwrap();
+        let regex = Regex::new_with_options(
+            "abc",
+            crate::RegexOptions {
+                pretty_print_ast: true,
+            },
+        )
+        .unwrap();
 
         assert!(regex.verify("There must be abc in here"));
         assert!(!regex.verify("No ab followed by c in here"));
@@ -547,7 +593,13 @@ mod tests {
     fn uncompleted_matching_group_fails() {
         let regex = Regex::new("[ab");
 
-        assert_eq!(regex, Err(RegexCompileError::MissingBracketError(']')));
+        assert_eq!(
+            regex,
+            Err(RegexCompileError::new(
+                crate::SourceLocation(4),
+                crate::RegexCompileErrorType::UnexpectedEOL
+            ))
+        );
     }
 
     #[test]
